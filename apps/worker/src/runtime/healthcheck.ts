@@ -34,20 +34,30 @@ function describeError(err: unknown): string {
   return e.message || e.code || String(err)
 }
 
-/** Resolves with an error description, or `undefined` when the probe passed. Never rejects. */
+/**
+ * Resolves with an error description, or `undefined` when the probe passed. Never rejects.
+ * `timeoutMs` is an absolute deadline for getting the status line, on top of the socket idle timeout,
+ * so a server that dribbles headers cannot keep the probe alive. The body is never read.
+ */
 function httpProbe(host: string, port: number, path: string, timeoutMs: number): Promise<string | undefined> {
   return new Promise((resolve) => {
+    let deadlineTimer: NodeJS.Timeout | undefined
+    const done = (result: string | undefined) => {
+      clearTimeout(deadlineTimer)
+      resolve(result)
+    }
     try {
       // `agent: false` = a fresh, non-keep-alive connection per probe.
       const req = http.get({ host, port, path, agent: false, timeout: timeoutMs }, (res) => {
-        res.resume()
         const status = res.statusCode ?? 0
-        resolve(status >= 200 && status < 300 ? undefined : `HTTP ${status}`)
+        res.destroy() // only the status matters; do not wait for (or buffer) the body
+        done(status >= 200 && status < 300 ? undefined : `HTTP ${status}`)
       })
-      req.on('timeout', () => req.destroy(new Error('request timed out')))
-      req.on('error', (err) => resolve(describeError(err)))
+      deadlineTimer = setTimeout(() => req.destroy(new Error('timeout')), timeoutMs)
+      req.on('timeout', () => req.destroy(new Error('timeout')))
+      req.on('error', (err) => done(describeError(err)))
     } catch (err) {
-      resolve(describeError(err))
+      done(describeError(err))
     }
   })
 }
@@ -73,23 +83,32 @@ function tcpProbe(host: string, port: number, timeoutMs: number): Promise<string
 
 /**
  * Waits until the container is healthy: one probe per interval, giving up after
- * `timeoutMs`. Fails immediately if the container stops running. In `running`
- * mode there is nothing to probe, so the container simply has to stay up for the
- * grace period (capped by the overall timeout).
+ * `timeoutMs`. Fails immediately if the container disappears or stops running. In
+ * `running` mode there is nothing to probe, so the container simply has to stay up
+ * for the grace period (capped by the overall timeout) without being restarted by
+ * Docker. In `http`/`tcp` mode a restart is tolerated (an app may crash once on boot)
+ * but is what the timeout reason reports if the probes never succeed.
  */
 export async function waitHealthy(t: HealthTarget, o: HealthOptions): Promise<HealthResult> {
   const intervalMs = o.intervalMs ?? DEFAULT_INTERVAL_MS
   const startedAt = Date.now()
   const deadline = startedAt + o.timeoutMs
   const graceEnd = startedAt + Math.min(o.runningGraceMs ?? DEFAULT_RUNNING_GRACE_MS, o.timeoutMs)
+  let baselineRestarts: number | undefined
   let lastError: string | undefined
 
   for (let first = true; ; first = false) {
     const state = await o.state()
+    if (!state.exists) return { ok: false, reason: 'container disappeared' }
     if (!state.running) return { ok: false, reason: `container exited with code ${state.exitCode}` }
 
+    baselineRestarts ??= state.restartCount
+    // Docker only reports `restarting` during the back-off wait, so a crash loop is caught by its restart count.
+    const restarted = state.restartCount > baselineRestarts
+
     if (t.mode === 'running') {
-      // Docker reports a container in restart back-off as running; that is not "stayed up".
+      if (restarted) return { ok: false, reason: `container restarted during startup (exit code ${state.exitCode})` }
+      // A container in restart back-off counts as running to Docker; that is not "stayed up".
       if (!state.restarting && Date.now() >= graceEnd) return { ok: true }
       if (state.restarting) lastError = 'container is restarting'
     }
@@ -105,7 +124,7 @@ export async function waitHealthy(t: HealthTarget, o: HealthOptions): Promise<He
       const error =
         t.mode === 'http' ? await httpProbe(t.host, t.port, t.path ?? '/', probeTimeoutMs) : await tcpProbe(t.host, t.port, probeTimeoutMs)
       if (error === undefined) return { ok: true }
-      lastError = error
+      lastError = restarted ? `container restarted (exit code ${state.exitCode})` : error
     }
 
     const wakeAt = t.mode === 'running' && Date.now() < graceEnd ? graceEnd : deadline

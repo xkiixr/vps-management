@@ -98,7 +98,7 @@ export function createDockerRuntime(docker: Dockerode = new Dockerode()): Docker
         await container.start()
       } catch (err) {
         // Leave nothing behind that would block the name.
-        await container.remove({ force: true }).catch(() => undefined)
+        await container.remove({ force: true, v: true }).catch(() => undefined)
         throw err
       }
     },
@@ -126,7 +126,8 @@ export function createDockerRuntime(docker: Dockerode = new Dockerode()): Docker
         // 304: not running; 404: no such container (remove below is then a no-op too).
         if (statusCode(err) !== 304 && statusCode(err) !== 404) throw err
       }
-      await orMissing(() => container.remove({ force: true }))
+      // `v` drops the container's anonymous volumes only (never named volumes or host paths).
+      await orMissing(() => container.remove({ force: true, v: true }))
     },
 
     async restart(name) {

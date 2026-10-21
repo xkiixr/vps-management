@@ -8,6 +8,8 @@ export const MEMORY_LABEL = 'vpsm.memory-mb'
 
 const MIB = 1024 * 1024
 const PIDS_LIMIT = 512
+const MIN_MEMORY_MB = 6 // Docker refuses less
+const MIN_NANO_CPUS = 1e7 // 0.01 CPU
 // Docker's default capability set minus the ones a web app has no use for.
 const DROPPED_CAPABILITIES = ['NET_RAW', 'MKNOD', 'AUDIT_WRITE', 'SETFCAP', 'SETPCAP', 'SYS_CHROOT']
 
@@ -38,9 +40,20 @@ function restartPolicy(deploy: DeployConfig): Dockerode.HostConfig['RestartPolic
  * The create options for one user container: resource limits, security baseline,
  * log rotation and restart policy. Nothing is published to the host and nothing
  * is bind-mounted; the container is reachable only through its network alias.
+ * Throws on a memory or CPU limit that Docker would treat as "unlimited".
  */
 export function buildContainerSpec(i: ContainerSpecInput): Dockerode.ContainerCreateOptions {
-  const memory = i.deploy.memoryLimitMB * MIB
+  // Docker reads Memory 0 and NanoCpus 0 as "unlimited" (NaN is serialised as null, i.e. 0), so never let one through.
+  const { memoryLimitMB, cpuLimit } = i.deploy
+  if (!Number.isInteger(memoryLimitMB) || memoryLimitMB < MIN_MEMORY_MB) {
+    throw new Error(`invalid memory limit: ${memoryLimitMB} MB (must be an integer of at least ${MIN_MEMORY_MB})`)
+  }
+  const nanoCpus = Math.round(cpuLimit * 1e9)
+  if (!Number.isFinite(nanoCpus) || nanoCpus < MIN_NANO_CPUS) {
+    throw new Error(`invalid CPU limit: ${cpuLimit} (must be at least ${MIN_NANO_CPUS / 1e9})`)
+  }
+
+  const memory = memoryLimitMB * MIB
   return {
     name: i.name,
     Image: i.image,
@@ -52,12 +65,12 @@ export function buildContainerSpec(i: ContainerSpecInput): Dockerode.ContainerCr
       [MANAGED_LABEL]: 'true',
       [DEPLOYMENT_LABEL]: i.deploymentId,
       [INSTANCE_LABEL]: i.serviceInstanceId,
-      [MEMORY_LABEL]: String(i.deploy.memoryLimitMB),
+      [MEMORY_LABEL]: String(memoryLimitMB),
     },
     HostConfig: {
       Memory: memory,
       MemorySwap: memory, // equal to Memory: no swap
-      NanoCpus: Math.round(i.deploy.cpuLimit * 1e9),
+      NanoCpus: nanoCpus,
       PidsLimit: PIDS_LIMIT,
       Privileged: false,
       SecurityOpt: ['no-new-privileges:true'],

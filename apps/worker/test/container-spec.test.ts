@@ -75,4 +75,22 @@ describe('buildContainerSpec', () => {
     expect(spec.Cmd).toBeUndefined()
     expect(buildContainerSpec({ ...input, cmd: ['node', 'server.js'] }).Cmd).toEqual(['node', 'server.js'])
   })
+
+  describe('refuses limits that Docker would read as "unlimited"', () => {
+    const withDeploy = (patch: Partial<typeof DEFAULT_DEPLOY_CONFIG>) => () =>
+      buildContainerSpec({ ...input, deploy: { ...DEFAULT_DEPLOY_CONFIG, ...patch } })
+
+    test.each([0, NaN, 5.5, 5, -512, Infinity])('memory %s MB', (memoryLimitMB) => {
+      expect(withDeploy({ memoryLimitMB })).toThrow(`invalid memory limit: ${memoryLimitMB} MB (must be an integer of at least 6)`)
+    })
+
+    test.each([0, 1e-12, 0.009, -1, NaN, Infinity])('cpu %s', (cpuLimit) => {
+      expect(withDeploy({ cpuLimit })).toThrow(`invalid CPU limit: ${cpuLimit} (must be at least 0.01)`)
+    })
+
+    test('the smallest allowed limits still work', () => {
+      const tiny = withDeploy({ memoryLimitMB: 6, cpuLimit: 0.01 })()
+      expect(tiny.HostConfig).toMatchObject({ Memory: 6 * 1024 * 1024, MemorySwap: 6 * 1024 * 1024, NanoCpus: 1e7 })
+    })
+  })
 })

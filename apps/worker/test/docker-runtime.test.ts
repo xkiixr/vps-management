@@ -164,19 +164,19 @@ describe('run', () => {
       createContainer: async () => container,
     })
     await expect(createDockerRuntime(docker).run({ name: 'vpsm-x', Image: 'x' })).rejects.toThrow('exec not found')
-    expect(remove).toHaveBeenCalledWith({ force: true })
+    expect(remove).toHaveBeenCalledWith({ force: true, v: true })
   })
 })
 
 describe('stopAndRemove', () => {
-  test('stops with the timeout then force-removes', async () => {
+  test('stops with the timeout then force-removes it together with its anonymous volumes', async () => {
     const calls: string[] = []
     const container = {
       stop: async (o: object) => void calls.push(`stop ${JSON.stringify(o)}`),
       remove: async (o: object) => void calls.push(`remove ${JSON.stringify(o)}`),
     }
     await createDockerRuntime(fake({ getContainer: () => container })).stopAndRemove('c', 10)
-    expect(calls).toEqual(['stop {"t":10}', 'remove {"force":true}'])
+    expect(calls).toEqual(['stop {"t":10}', 'remove {"force":true,"v":true}'])
   })
 
   test('is a no-op for a missing container and tolerates one that is not running', async () => {
