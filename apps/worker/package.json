@@ -5,6 +5,10 @@
   "type": "module",
   "dependencies": {
     "@vpsm/core": "workspace:*",
-    "@vpsm/db": "workspace:*"
+    "@vpsm/db": "workspace:*",
+    "dockerode": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.2"
   }
 }
