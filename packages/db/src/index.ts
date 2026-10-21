@@ -1,3 +1,5 @@
 export * from './schema'
 export * from './client'
 export * from './migrate'
+export * from './deployments'
+export * from './projects'
