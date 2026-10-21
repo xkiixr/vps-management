@@ -1,5 +1,5 @@
-import path from 'node:path'
 import { runCommand, type LineHandler, type RunCommand } from '../exec'
+import { resolveDockerfilePath } from './dockerfile-path'
 import { BuildError } from './errors'
 
 export const BUILDER_NAME = 'vpsm-builder'
@@ -61,7 +61,7 @@ export async function buildImage(i: {
       i.contextDir,
     )
   } else {
-    args.push('-f', path.join(i.contextDir, i.dockerfilePath ?? 'Dockerfile'), i.contextDir)
+    args.push('-f', resolveDockerfilePath(i.contextDir, i.dockerfilePath), i.contextDir)
   }
 
   const { exitCode, timedOut } = await run('docker', args, { timeoutMs: i.timeoutMs, onLine: i.onLine })

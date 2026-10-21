@@ -107,9 +107,29 @@ describe('chooseBuilder', () => {
       BuildError,
     )
     await expect(chooseBuilder(dir, { builder: 'auto', dockerfilePath: '../Dockerfile' })).rejects.toBeInstanceOf(BuildError)
-    await expect(
-      chooseBuilder(dir, { builder: 'dockerfile', dockerfilePath: path.join(path.dirname(dir), 'Dockerfile') }),
-    ).rejects.toBeInstanceOf(BuildError)
+    await expect(chooseBuilder(dir, { builder: 'dockerfile', dockerfilePath: '/../Dockerfile' })).rejects.toBeInstanceOf(
+      BuildError,
+    )
+    await expect(chooseBuilder(dir, { builder: 'dockerfile', dockerfilePath: './docker/../../Dockerfile' })).rejects.toBeInstanceOf(
+      BuildError,
+    )
+  })
+
+  test('a leading / or ./ in dockerfilePath means repo-relative, never the host filesystem', async () => {
+    const dir = tmpDir()
+    fs.mkdirSync(path.join(dir, 'docker'))
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM scratch\n')
+    fs.writeFileSync(path.join(dir, 'docker', 'Dockerfile'), 'FROM scratch\n')
+    for (const dockerfilePath of ['/Dockerfile', './Dockerfile', '/docker/Dockerfile', './docker/Dockerfile']) {
+      expect(await chooseBuilder(dir, { builder: 'dockerfile', dockerfilePath })).toBe('dockerfile')
+    }
+    // An absolute host path does not reach outside the repository: it is looked up inside it.
+    const hostFile = path.join(tmpDir(), 'Dockerfile')
+    fs.writeFileSync(hostFile, 'FROM scratch\n')
+    await expect(chooseBuilder(dir, { builder: 'dockerfile', dockerfilePath: hostFile })).rejects.toThrow(
+      `Dockerfile not found at ${hostFile}`,
+    )
+    expect(await chooseBuilder(dir, { builder: 'auto', dockerfilePath: '/nope/Dockerfile' })).toBe('railpack')
   })
 
   test('a Dockerfile symlinked to outside the context is rejected', async () => {
@@ -213,15 +233,62 @@ describe('railpackPrepare', () => {
       expect(run.calls).toHaveLength(1)
     })
 
-    test('joins several messages with "; "', async () => {
+    const failure = async (logs: unknown[]) => {
       const outDir = tmpDir()
-      const run = runWritingInfo(
+      const err = await railpackPrepare({
+        ...base,
         outDir,
-        '{"success":false,"logs":[{"Level":"warn","Msg":"first"},{"Level":"error","Msg":"second"}]}',
-      )
-      await expect(railpackPrepare({ ...base, outDir, run })).rejects.toThrow(
-        'railpack could not plan this app: first; second',
-      )
+        run: runWritingInfo(outDir, JSON.stringify({ success: false, logs })),
+      }).catch((e) => e)
+      expect(err).toBeInstanceOf(BuildError)
+      return err.message as string
+    }
+
+    test('joins several error messages with "; "', async () => {
+      expect(
+        await failure([
+          { Level: 'error', Msg: 'first' },
+          { Level: 'error', Msg: 'second' },
+        ]),
+      ).toBe('railpack could not plan this app: first; second')
+    })
+
+    test('prefers error-level messages over warnings and suggestions', async () => {
+      expect(
+        await failure([
+          { Level: 'warn', Msg: 'script start.sh not found' },
+          { Level: 'suggestion', Msg: 'Add a .dockerignore' },
+          { Level: 'ERROR', Msg: 'could not determine how to build the app' },
+          { Level: 'info', Msg: 'Detected Node' },
+        ]),
+      ).toBe('railpack could not plan this app: could not determine how to build the app')
+    })
+
+    test('falls back to every message when none is error-level', async () => {
+      expect(
+        await failure([
+          { Level: 'warn', Msg: 'first' },
+          { Level: 'info', Msg: 'second' },
+          { Msg: 'third' },
+        ]),
+      ).toBe('railpack could not plan this app: first; second; third')
+    })
+
+    test('collapses newlines and runs of whitespace into single spaces', async () => {
+      expect(
+        await failure([
+          { Level: 'error', Msg: 'Could not determine\n\nthe languages:\n- Php\n- Node \t ok\r\n' },
+          { Level: 'error', Msg: '   ' },
+        ]),
+      ).toBe('railpack could not plan this app: Could not determine the languages: - Php - Node ok')
+    })
+
+    test('caps the messages at 500 characters and marks the cut with an ellipsis', async () => {
+      const long = await failure([{ Level: 'error', Msg: 'x'.repeat(1000) }])
+      expect(long).toBe(`railpack could not plan this app: ${'x'.repeat(500)}…`)
+      // Exactly at the limit is left alone.
+      const exact = await failure([{ Level: 'error', Msg: 'y'.repeat(500) }])
+      expect(exact).toBe(`railpack could not plan this app: ${'y'.repeat(500)}`)
     })
 
     test.each([
@@ -234,6 +301,56 @@ describe('railpackPrepare', () => {
       const err = await railpackPrepare({ ...base, outDir, run: runWritingInfo(outDir, info) }).catch((e) => e)
       expect(err).toBeInstanceOf(BuildError)
       expect(err.message).toBe('railpack could not plan this app')
+    })
+  })
+
+  describe('timeout', () => {
+    test('defaults to 10 minutes and applies to every attempt', async () => {
+      const run = fakeRun([75, 75, 0])
+      await railpackPrepare({ ...base, run, sleep: async () => {} })
+      expect(run.opts.map((o) => o?.timeoutMs)).toEqual([600_000, 600_000, 600_000])
+    })
+
+    test('uses the given timeoutMs', async () => {
+      const run = fakeRun([0])
+      await railpackPrepare({ ...base, run, timeoutMs: 30_000 })
+      expect(run.opts[0]?.timeoutMs).toBe(30_000)
+    })
+
+    test('a timed out attempt fails at once, with no retry', async () => {
+      const run = fakeRunResult({ exitCode: 124, timedOut: true })
+      const sleeps: number[] = []
+      const err = await railpackPrepare({
+        ...base,
+        run,
+        sleep: async (ms) => {
+          sleeps.push(ms)
+        },
+      }).catch((e) => e)
+      expect(err).toBeInstanceOf(BuildError)
+      expect(err.message).toBe('railpack prepare timed out after 10 minutes')
+      expect(run.calls).toHaveLength(1)
+      expect(sleeps).toEqual([])
+    })
+
+    test('a timeout after a transient failure is not retried either', async () => {
+      const results = [{ exitCode: 75, timedOut: false }, { exitCode: 124, timedOut: true }]
+      let n = 0
+      const run = (async () => results[n++] ?? { exitCode: 0, timedOut: false }) as RunCommand
+      await expect(railpackPrepare({ ...base, run, sleep: async () => {} })).rejects.toThrow(
+        'railpack prepare timed out after 10 minutes',
+      )
+      expect(n).toBe(2)
+    })
+
+    test('describes the configured limit', async () => {
+      const timedOut = fakeRunResult({ exitCode: 124, timedOut: true })
+      await expect(railpackPrepare({ ...base, run: timedOut, timeoutMs: 60_000 })).rejects.toThrow(
+        'railpack prepare timed out after 1 minute',
+      )
+      await expect(railpackPrepare({ ...base, run: timedOut, timeoutMs: 90_000 })).rejects.toThrow(
+        'railpack prepare timed out after 90 seconds',
+      )
     })
   })
 
@@ -297,6 +414,25 @@ describe('buildImage', () => {
     ]
     expect(run.calls[0]).toEqual(expected('/src/Dockerfile'))
     expect(run.calls[1]).toEqual(expected('/src/docker/prod.Dockerfile'))
+  })
+
+  test('dockerfilePath with a leading / or ./ is repo-relative, like chooseBuilder resolves it', async () => {
+    const run = fakeRun([0, 0, 0])
+    const common = { builder: 'dockerfile' as const, contextDir: '/src', tag: 't', cacheKey: 'k', frontendImage: 'f', timeoutMs: 1000, onLine: () => {}, run }
+    await buildImage({ ...common, dockerfilePath: '/docker/Dockerfile' })
+    await buildImage({ ...common, dockerfilePath: './docker/Dockerfile' })
+    await buildImage({ ...common, dockerfilePath: '/Dockerfile' })
+    const fileOf = (call: Call) => call[1][call[1].indexOf('-f') + 1]
+    expect(run.calls.map(fileOf)).toEqual(['/src/docker/Dockerfile', '/src/docker/Dockerfile', '/src/Dockerfile'])
+  })
+
+  test('dockerfilePath escaping the context is rejected without running docker', async () => {
+    const run = fakeRun([0])
+    const common = { builder: 'dockerfile' as const, contextDir: '/src', tag: 't', cacheKey: 'k', frontendImage: 'f', timeoutMs: 1000, onLine: () => {}, run }
+    for (const dockerfilePath of ['../Dockerfile', '/../Dockerfile', 'docker/../../Dockerfile']) {
+      await expect(buildImage({ ...common, dockerfilePath })).rejects.toBeInstanceOf(BuildError)
+    }
+    expect(run.calls).toHaveLength(0)
   })
 
   test('reports timeout in minutes', async () => {

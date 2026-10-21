@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { describeDuration } from '../duration'
 import { runCommand, type LineHandler, type RunCommand } from '../exec'
+import { stripLeadingRoot } from '../repo-path'
 
 export class SourceError extends Error {
   constructor(message: string) {
@@ -39,17 +41,6 @@ export type FetchedSource = { commitSha: string; commitMessage: string; contextD
 
 const isInside = (parent: string, child: string) =>
   child === parent || child.startsWith(parent + path.sep)
-
-// "/app" and "./app" are common ways to write a path relative to the repository root.
-const stripLeadingRoot = (dir: string) => dir.replace(/^(?:\.?\/+)+/, '')
-
-const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`
-
-function describeDuration(ms: number): string {
-  if (ms % 60_000 === 0) return plural(ms / 60_000, 'minute')
-  if (ms % 1000 === 0) return plural(ms / 1000, 'second')
-  return `${ms} ms`
-}
 
 export async function fetchSource(i: FetchSourceInput): Promise<FetchedSource> {
   const run = i.run ?? runCommand
