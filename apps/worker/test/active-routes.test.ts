@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
-import { afterAll, beforeEach, expect, test } from 'vitest'
+import { afterAll, beforeEach, expect, test, vi } from 'vitest'
 import {
   createAppService,
   createProject,
@@ -121,12 +121,59 @@ test('routes are ordered by service instance id', async () => {
   expect(routes.map((r) => r.serviceInstanceId)).toEqual([...ids].sort())
 })
 
-test('a live deployment without a port in its snapshot fails loudly', async () => {
-  const si1 = await addService('web')
-  const id = await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
-  await db.update(deployments).set({ configSnapshot: null }).where(eq(deployments.id, id))
+// A live instance whose route cannot be rendered safely, next to a good sibling `web`.
+async function goodAndBadWithHostname(): Promise<{ good: string; bad: string }> {
+  const good = await addService('web')
+  const bad = await addService('api')
+  await deployLive(good, 'vpsm-web-aaaaaaaa', 3000)
+  await deployLive(bad, 'vpsm-api-bbbbbbbb', 4000)
+  await db.insert(domains).values({ serviceInstanceId: bad, hostname: 'Shop.Example.com', kind: 'custom' })
+  return { good, bad }
+}
 
-  await expect(loadActiveRoutes(db)).rejects.toThrow(`deployment ${id} has no valid deploy.port in its config snapshot`)
+async function goodAndBadWithoutPort(): Promise<{ good: string; bad: string; badDeploymentId: string }> {
+  const good = await addService('web')
+  const bad = await addService('api')
+  await deployLive(good, 'vpsm-web-aaaaaaaa', 3000)
+  const badDeploymentId = await deployLive(bad, 'vpsm-api-bbbbbbbb', 4000)
+  await db.update(deployments).set({ configSnapshot: null }).where(eq(deployments.id, badDeploymentId))
+  return { good, bad, badDeploymentId }
+}
+
+function collectInvalid(): { calls: [string, string][]; onInvalid: (id: string, reason: string) => void } {
+  const calls: [string, string][] = []
+  return { calls, onInvalid: (id, reason) => void calls.push([id, reason]) }
+}
+
+test('a route with an invalid hostname is skipped and reported, siblings are kept', async () => {
+  const { good, bad } = await goodAndBadWithHostname()
+  const { calls, onInvalid } = collectInvalid()
+
+  expect(await loadActiveRoutes(db, onInvalid)).toEqual([
+    { serviceInstanceId: good, hostnames: ['web-shop.apps.example.com'], upstreamUrl: 'http://vpsm-web-aaaaaaaa:3000' },
+  ])
+  expect(calls).toEqual([[bad, 'invalid hostname: Shop.Example.com']])
+})
+
+test('a live deployment without a port in its snapshot is skipped and reported, siblings are kept', async () => {
+  const { good, bad, badDeploymentId } = await goodAndBadWithoutPort()
+  const { calls, onInvalid } = collectInvalid()
+
+  expect(await loadActiveRoutes(db, onInvalid)).toEqual([
+    { serviceInstanceId: good, hostnames: ['web-shop.apps.example.com'], upstreamUrl: 'http://vpsm-web-aaaaaaaa:3000' },
+  ])
+  expect(calls).toEqual([[bad, `deployment ${badDeploymentId} has no valid deploy.port in its config snapshot`]])
+})
+
+test('invalid routes are warned about by default', async () => {
+  const { bad } = await goodAndBadWithHostname()
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    await loadActiveRoutes(db)
+    expect(warn).toHaveBeenCalledExactlyOnceWith(`skipping route for service instance ${bad}: invalid hostname: Shop.Example.com`)
+  } finally {
+    warn.mockRestore()
+  }
 })
 
 test('regenerateRoutes writes the routes of live deployments to routes.yml', async () => {
@@ -140,6 +187,25 @@ test('regenerateRoutes writes the routes of live deployments to routes.yml', asy
     const yaml = await readFile(join(dir, 'routes.yml'), 'utf8')
     expect(yaml).toContain(`    r-${si1}:\n      rule: Host(\`web-shop.apps.example.com\`)\n`)
     expect(yaml).toContain('          - url: http://vpsm-web-aaaaaaaa:3000\n')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('regenerateRoutes still writes the good routes when a sibling is invalid', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vpsm-regen-'))
+  try {
+    const { good, bad } = await goodAndBadWithHostname()
+    const { calls, onInvalid } = collectInvalid()
+
+    await regenerateRoutes(db, dir, onInvalid)
+
+    const yaml = await readFile(join(dir, 'routes.yml'), 'utf8')
+    expect(yaml).toContain(`    r-${good}:\n`)
+    expect(yaml).toContain('          - url: http://vpsm-web-aaaaaaaa:3000\n')
+    expect(yaml).not.toContain(bad)
+    expect(yaml).not.toContain('Shop.Example.com')
+    expect(calls).toEqual([[bad, 'invalid hostname: Shop.Example.com']])
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

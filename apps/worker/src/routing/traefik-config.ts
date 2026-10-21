@@ -14,7 +14,7 @@ const CERT_RESOLVER = 'le'
 const SERVICE_INSTANCE_ID_PATTERN = /^[a-z0-9-]+$/
 const UPSTREAM_URL_PATTERN = /^http:\/\/[a-z0-9-]+:[0-9]+$/
 
-function validateRoute(route: Route): void {
+export function validateRoute(route: Route): void {
   if (!SERVICE_INSTANCE_ID_PATTERN.test(route.serviceInstanceId)) {
     throw new Error(`invalid route: service instance id ${JSON.stringify(route.serviceInstanceId)}`)
   }

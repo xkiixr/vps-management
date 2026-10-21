@@ -2,7 +2,7 @@ import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test } from 'vitest'
-import { renderRoutesYaml, writeRoutesFile } from '../src/routing/traefik-config'
+import { renderRoutesYaml, validateRoute, writeRoutesFile } from '../src/routing/traefik-config'
 
 test('renders router and service per instance', () => {
   expect(
@@ -89,6 +89,13 @@ test.each(['https://x:1', 'http://x', 'http://x:1/path', 'http://x:1\n  - url: h
 
 test('refuses a route without hostnames', () => {
   expect(() => renderRoutesYaml([{ serviceInstanceId: 'si1', hostnames: [], upstreamUrl: 'http://x:1' }])).toThrow('invalid route')
+})
+
+test('validateRoute accepts a good route and throws on a bad one', () => {
+  expect(() => validateRoute({ serviceInstanceId: 'si1', hostnames: ['a.example.com'], upstreamUrl: 'http://x:1' })).not.toThrow()
+  expect(() => validateRoute({ serviceInstanceId: 'si1', hostnames: ['A.example.com'], upstreamUrl: 'http://x:1' })).toThrow(
+    'invalid hostname: A.example.com',
+  )
 })
 
 let dir: string
