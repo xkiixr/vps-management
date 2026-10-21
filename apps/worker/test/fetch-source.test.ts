@@ -25,6 +25,15 @@ function git(cwd: string, ...args: string[]): string {
   }).trim()
 }
 
+/** Every file under `dir` (recursively) whose bytes contain `needle`. */
+function filesContaining(dir: string, needle: string): string[] {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) return filesContaining(full, needle)
+    return entry.isFile() && fs.readFileSync(full).includes(needle) ? [full] : []
+  })
+}
+
 let root: string
 let cloneUrl: string
 let firstSha: string
@@ -105,9 +114,28 @@ describe('fetchSource', () => {
     await expect(fetchSource({ ...base, cloneUrl, rootDirectory: '../..', destDir })).rejects.toThrow(
       'rootDirectory escapes repository',
     )
-    await expect(fetchSource({ ...base, cloneUrl, rootDirectory: '/etc', destDir })).rejects.toThrow(
+    await expect(fetchSource({ ...base, cloneUrl, rootDirectory: '/../..', destDir })).rejects.toThrow(
       'rootDirectory escapes repository',
     )
+    await expect(fetchSource({ ...base, cloneUrl, rootDirectory: './app/../..', destDir })).rejects.toThrow(
+      'rootDirectory escapes repository',
+    )
+  })
+
+  test('treats a leading slash or ./ as relative to the repository root', async () => {
+    for (const rootDirectory of ['/app', './app', '//app/', '/./app']) {
+      const destDir = freshDest()
+      const r = await fetchSource({ ...base, cloneUrl, rootDirectory, destDir })
+      expect(r.contextDir).toBe(path.join(destDir, 'app'))
+    }
+    const root = await fetchSource({ ...base, cloneUrl, rootDirectory: '/', destDir: freshDest() })
+    expect(path.basename(root.contextDir)).toMatch(/^dest-\d+$/)
+  })
+
+  test('reports a missing absolute-looking rootDirectory as not found, not as an escape', async () => {
+    await expect(
+      fetchSource({ ...base, cloneUrl, rootDirectory: '/etc', destDir: freshDest() }),
+    ).rejects.toThrow('rootDirectory not found: /etc')
   })
 
   test('rejects rootDirectory that is a symlink leaving the repo', async () => {
@@ -159,8 +187,41 @@ describe('fetchSource', () => {
     expect(lines).toEqual(['fatal: unable to access https://x-access-token:***@github.com/acme/web.git'])
   })
 
-  test('passes redact and a line handler to every git invocation', async () => {
-    const calls: { args: string[]; redact?: string[]; hasOnLine: boolean }[] = []
+  test.each([
+    ['branch head', undefined],
+    ['pinned commit', 'first'],
+  ])('leaves no token on disk after cloning a token URL (%s)', async (_name, pin) => {
+    // The URL carries a fake token but git is told (via insteadOf) to fetch from the local bare repo.
+    const tokenUrl = githubCloneUrl('acme/web', 'FAKE-TOKEN')
+    const viaLocalBare: RunCommand = (cmd, args, opts) =>
+      runCommand(cmd, args, {
+        ...opts,
+        env: {
+          ...opts?.env,
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: `url.${cloneUrl}.insteadOf`,
+          GIT_CONFIG_VALUE_0: tokenUrl,
+        },
+      })
+    const destDir = freshDest()
+    const r = await fetchSource({
+      ...base,
+      cloneUrl: tokenUrl,
+      commitSha: pin ? firstSha : undefined,
+      destDir,
+      redact: ['FAKE-TOKEN'],
+      run: viaLocalBare,
+    })
+    expect(r.commitSha).toBe(pin ? firstSha : headSha)
+
+    const leaks = filesContaining(path.join(destDir, '.git'), 'FAKE-TOKEN')
+    expect(leaks).toEqual([])
+    expect(git(destDir, 'remote', '-v')).not.toContain('FAKE-TOKEN')
+    expect(git(destDir, 'config', '--local', '--list')).not.toContain('FAKE-TOKEN')
+  })
+
+  test('passes redact, a line handler and a timeout to every git invocation', async () => {
+    const calls: { step: string; redact?: string[]; hasOnLine: boolean; timeoutMs?: number }[] = []
     await fetchSource({
       ...base,
       cloneUrl,
@@ -168,13 +229,54 @@ describe('fetchSource', () => {
       destDir: freshDest(),
       redact: ['secret-value'],
       run: (cmd, args, opts) => {
-        calls.push({ args, redact: opts?.redact, hasOnLine: typeof opts?.onLine === 'function' })
+        const step = args.includes('-C') ? args[2]! : args[0]!
+        calls.push({ step, redact: opts?.redact, hasOnLine: typeof opts?.onLine === 'function', timeoutMs: opts?.timeoutMs })
         return runCommand(cmd, args, opts)
       },
     })
-    expect(calls).toHaveLength(4)
+    expect(calls.map((c) => c.step)).toEqual(['clone', 'fetch', 'remote', 'checkout', 'log'])
     for (const c of calls) expect(c.redact).toEqual(['secret-value'])
     expect(calls.every((c) => c.hasOnLine)).toBe(true)
+    expect(calls.map((c) => c.timeoutMs)).toEqual([600_000, 600_000, 60_000, 60_000, 60_000])
+  })
+
+  test('timeouts are overridable', async () => {
+    const seen: number[] = []
+    await fetchSource({
+      ...base,
+      cloneUrl,
+      commitSha: firstSha,
+      destDir: freshDest(),
+      timeouts: { networkMs: 120_000, localMs: 30_000 },
+      run: (cmd, args, opts) => {
+        seen.push(opts!.timeoutMs!)
+        return runCommand(cmd, args, opts)
+      },
+    })
+    expect(seen).toEqual([120_000, 120_000, 30_000, 30_000, 30_000])
+  })
+
+  test('reports a timed out clone as a SourceError in minutes', async () => {
+    const run: RunCommand = async () => ({ exitCode: 124, timedOut: true })
+    const error = await fetchSource({ ...base, cloneUrl, destDir: freshDest(), run }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(SourceError)
+    expect((error as Error).message).toBe('git clone timed out after 10 minutes')
+  })
+
+  test('uses the singular for a one minute timeout of a local git call', async () => {
+    // Clone for real, then make the next call (removing the remote) time out.
+    const run: RunCommand = (cmd, args, opts) =>
+      args.includes('remote') ? Promise.resolve({ exitCode: 124, timedOut: true }) : runCommand(cmd, args, opts)
+    await expect(fetchSource({ ...base, cloneUrl, destDir: freshDest(), run })).rejects.toThrow(
+      'git remote timed out after 1 minute',
+    )
+  })
+
+  test('formats overridden timeouts that are not whole minutes', async () => {
+    const run: RunCommand = async () => ({ exitCode: 124, timedOut: true })
+    await expect(
+      fetchSource({ ...base, cloneUrl, destDir: freshDest(), run, timeouts: { networkMs: 90_000 } }),
+    ).rejects.toThrow('git clone timed out after 90 seconds')
   })
 })
 

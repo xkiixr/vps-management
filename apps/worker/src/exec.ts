@@ -23,7 +23,7 @@ const TIMEOUT_EXIT_CODE = 124
 /**
  * Runs a command without a shell (arguments are never interpreted), streams its
  * output line by line with secrets redacted, and enforces an optional timeout
- * (SIGTERM, then SIGKILL after 5 seconds). Resolves with the exit code; rejects
+ * (SIGTERM, then SIGKILL after 5 seconds, sent to the command's whole process group). Resolves with the exit code; rejects
  * only when the process cannot be started at all.
  */
 export const runCommand: RunCommand = (cmd, args, opts = {}) =>
@@ -37,7 +37,17 @@ export const runCommand: RunCommand = (cmd, args, opts = {}) =>
       cwd: opts.cwd,
       env: { ...process.env, ...opts.env },
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Own process group, so a timeout can take down the whole tree (build tools fork helpers).
+      detached: true,
     })
+    const signalTree = (signal: NodeJS.Signals) => {
+      try {
+        process.kill(-child.pid!, signal)
+      } catch {
+        // Group already gone (or never started); fall back to the direct child, which may also be gone.
+        child.kill(signal)
+      }
+    }
 
     const splitters = (['stdout', 'stderr'] as const).map((stream) => {
       const decoder = new StringDecoder('utf8')
@@ -63,10 +73,10 @@ export const runCommand: RunCommand = (cmd, args, opts = {}) =>
     if (opts.timeoutMs !== undefined && opts.timeoutMs > 0) {
       timeoutTimer = setTimeout(() => {
         timedOut = true
-        child.kill('SIGTERM')
+        signalTree('SIGTERM')
         killTimer = setTimeout(() => {
-          child.kill('SIGKILL')
-          // A grandchild may still hold the pipes open; release them so 'close' fires.
+          signalTree('SIGKILL')
+          // A survivor may still hold the pipes open; release them so 'close' fires.
           child.stdout.destroy()
           child.stderr.destroy()
         }, KILL_GRACE_MS)

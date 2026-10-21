@@ -11,6 +11,8 @@ export class SourceError extends Error {
 
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const COMMIT_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i
+const NETWORK_TIMEOUT_MS = 10 * 60_000
+const LOCAL_TIMEOUT_MS = 60_000
 
 export function githubCloneUrl(repo: string, token?: string): string {
   if (!REPO_PATTERN.test(repo)) throw new SourceError(`invalid repo: ${repo}`)
@@ -29,6 +31,8 @@ export type FetchSourceInput = {
   /** Secrets (e.g. the token inside `cloneUrl`) that must never reach `onLine` or an error message. */
   redact: string[]
   run?: RunCommand
+  /** Per-call limits: `clone`/`fetch` (default 10 min), local calls such as `checkout`/`log` (default 1 min). */
+  timeouts?: { networkMs?: number; localMs?: number }
 }
 
 export type FetchedSource = { commitSha: string; commitMessage: string; contextDir: string }
@@ -36,50 +40,59 @@ export type FetchedSource = { commitSha: string; commitMessage: string; contextD
 const isInside = (parent: string, child: string) =>
   child === parent || child.startsWith(parent + path.sep)
 
+// "/app" and "./app" are common ways to write a path relative to the repository root.
+const stripLeadingRoot = (dir: string) => dir.replace(/^(?:\.?\/+)+/, '')
+
+const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`
+
+function describeDuration(ms: number): string {
+  if (ms % 60_000 === 0) return plural(ms / 60_000, 'minute')
+  if (ms % 1000 === 0) return plural(ms / 1000, 'second')
+  return `${ms} ms`
+}
+
 export async function fetchSource(i: FetchSourceInput): Promise<FetchedSource> {
   const run = i.run ?? runCommand
+  const networkMs = i.timeouts?.networkMs ?? NETWORK_TIMEOUT_MS
+  const localMs = i.timeouts?.localMs ?? LOCAL_TIMEOUT_MS
   const repoDir = path.resolve(i.destDir)
-  const contextDir = path.resolve(repoDir, i.rootDirectory ?? '')
+  const contextDir = path.resolve(repoDir, stripLeadingRoot(i.rootDirectory ?? ''))
   if (!isInside(repoDir, contextDir)) throw new SourceError('rootDirectory escapes repository')
   // A full object id also keeps a hostile value from being parsed as a git option.
   if (i.commitSha && !COMMIT_SHA_PATTERN.test(i.commitSha)) throw new SourceError('invalid commitSha')
 
   // Error messages below deliberately omit the clone URL, which may carry a token.
-  const git = async (what: string, args: string[], onLine: LineHandler = i.onLine) => {
+  const git = async (what: string, args: string[], timeoutMs: number, onLine: LineHandler = i.onLine) => {
     const r = await run('git', args, {
       // Fail instead of prompting for credentials on a private repo with no/invalid token.
       env: { GIT_TERMINAL_PROMPT: '0' },
+      timeoutMs,
       onLine,
       redact: i.redact,
     })
+    if (r.timedOut) throw new SourceError(`git ${what} timed out after ${describeDuration(timeoutMs)}`)
     if (r.exitCode !== 0) throw new SourceError(`git ${what} failed (exit code ${r.exitCode})`)
   }
 
-  await git('clone', [
+  await git(
     'clone',
-    '--depth',
-    '1',
-    '--single-branch',
-    '--branch',
-    i.branch,
-    '--',
-    i.cloneUrl,
-    repoDir,
-  ])
-
+    ['clone', '--depth', '1', '--single-branch', '--branch', i.branch, '--', i.cloneUrl, repoDir],
+    networkMs,
+  )
   if (i.commitSha) {
-    await git('fetch', ['-C', repoDir, 'fetch', '--depth', '1', 'origin', i.commitSha])
-    await git('checkout', ['-C', repoDir, 'checkout', '--detach', i.commitSha])
+    await git('fetch', ['-C', repoDir, 'fetch', '--depth', '1', 'origin', i.commitSha], networkMs)
+  }
+  // The network part is over. `clone` stored the URL, token included, as remote.origin.url in
+  // .git/config, and that directory is handed to the build, so drop the remote entirely.
+  await git('remote', ['-C', repoDir, 'remote', 'remove', 'origin'], localMs)
+  if (i.commitSha) {
+    await git('checkout', ['-C', repoDir, 'checkout', '--detach', i.commitSha], localMs)
   }
 
   const logLines: string[] = []
-  await git(
-    'log',
-    ['-C', repoDir, 'log', '-1', '--format=%H%n%s'],
-    (line, stream) => {
-      if (stream === 'stdout') logLines.push(line)
-    },
-  )
+  await git('log', ['-C', repoDir, 'log', '-1', '--format=%H%n%s'], localMs, (line, stream) => {
+    if (stream === 'stdout') logLines.push(line)
+  })
   const [commitSha, commitMessage = ''] = logLines
   if (!commitSha) throw new SourceError('git log failed (no commit found)')
 

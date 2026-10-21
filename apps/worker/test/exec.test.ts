@@ -1,6 +1,16 @@
 import { describe, expect, test } from 'vitest'
 import { runCommand } from '../src/exec'
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ESRCH') return false
+    throw e
+  }
+}
+
 describe('runCommand', () => {
   test('streams lines and returns exit code', async () => {
     const lines: string[] = []
@@ -33,6 +43,27 @@ describe('runCommand', () => {
     const r = await runCommand('node', ['-e', script], { timeoutMs: 300 })
     expect(r).toEqual({ exitCode: 124, timedOut: true })
     expect(Date.now() - started).toBeGreaterThanOrEqual(5000)
+  }, 15_000)
+
+  test('timeout also kills the whole process tree, not just the direct child', async () => {
+    const script = [
+      'const { spawn } = require("node:child_process")',
+      'const g = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" })',
+      'console.log(g.pid)',
+      'setTimeout(() => {}, 60000)',
+    ].join(';')
+    const lines: string[] = []
+    let grandchild: number | undefined
+    try {
+      const r = await runCommand('node', ['-e', script], { timeoutMs: 2000, onLine: (l) => lines.push(l) })
+      expect(r).toEqual({ exitCode: 124, timedOut: true })
+      grandchild = Number(lines[0])
+      expect(Number.isInteger(grandchild)).toBe(true)
+      await expect.poll(() => isAlive(grandchild!), { timeout: 3000, interval: 50 }).toBe(false)
+    } finally {
+      // Never leak a 60 s process if the assertion above fails.
+      if (grandchild !== undefined && isAlive(grandchild)) process.kill(grandchild, 'SIGKILL')
+    }
   }, 15_000)
 
   test('replaces every occurrence of every secret and ignores empty strings', async () => {
