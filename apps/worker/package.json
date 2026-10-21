@@ -1,0 +1,10 @@
+{
+  "name": "@vpsm/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vpsm/core": "workspace:*",
+    "@vpsm/db": "workspace:*"
+  }
+}

@@ -176,6 +176,15 @@ importers:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.19.2)(tsx@4.23.15)
 
+  apps/worker:
+    dependencies:
+      '@vpsm/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@vpsm/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+
   packages/core: {}
 
   packages/db:
