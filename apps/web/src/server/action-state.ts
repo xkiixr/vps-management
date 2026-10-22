@@ -10,3 +10,12 @@ export type FieldErrors = Partial<Record<string, string>>
  *   its action is done, so without this a mistake in one field would wipe all the others.
  */
 export type ActionState = { error?: string; fieldErrors?: FieldErrors; notice?: string; values?: Record<string, string> }
+
+/**
+ * A password that was generated for someone and is shown to the admin once, with the email it is for. It is only
+ * ever part of the result of the action that made it: it is not stored, logged or audited anywhere.
+ */
+export type IssuedPassword = { email: string; password: string }
+
+/** The state of a form that can hand out a generated password (creating a user, resetting a password). */
+export type PasswordState = ActionState & { issued?: IssuedPassword }

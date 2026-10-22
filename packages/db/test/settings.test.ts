@@ -62,6 +62,22 @@ test.each([
   expect(await db.select().from(settings)).toHaveLength(0)
 })
 
+const BUDGET_MESSAGE = 'memory budget must be a positive whole number of MB'
+const MAX_MESSAGE = 'max memory per service must be a positive whole number of at least 6 MB'
+
+test.each([
+  [{ memoryBudgetMb: 0, maxServiceMemoryMb: 512 }, BUDGET_MESSAGE],
+  [{ memoryBudgetMb: -1024, maxServiceMemoryMb: 512 }, BUDGET_MESSAGE],
+  [{ memoryBudgetMb: 1024.5, maxServiceMemoryMb: 512 }, BUDGET_MESSAGE],
+  [{ memoryBudgetMb: Number.NaN, maxServiceMemoryMb: 512 }, BUDGET_MESSAGE],
+  [{ memoryBudgetMb: 1024, maxServiceMemoryMb: 0 }, MAX_MESSAGE],
+  [{ memoryBudgetMb: 1024, maxServiceMemoryMb: -5 }, MAX_MESSAGE],
+  [{ memoryBudgetMb: 1024, maxServiceMemoryMb: 512.5 }, MAX_MESSAGE],
+  [{ memoryBudgetMb: 1024, maxServiceMemoryMb: 5 }, MAX_MESSAGE],
+])('setResourceSettings says what is wrong with %o', async (v, message) => {
+  await expect(setResourceSettings(db, v, adminId)).rejects.toThrow(new ValidationError(message))
+})
+
 test('the smallest allowed max is 6 MB', async () => {
   await setResourceSettings(db, { memoryBudgetMb: 6, maxServiceMemoryMb: 6 }, adminId)
   expect(await getResourceSettings(db)).toEqual({ memoryBudgetMb: 6, maxServiceMemoryMb: 6 })

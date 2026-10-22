@@ -69,8 +69,19 @@ export async function requireAdmin(): Promise<SafeUser> {
  * must come from the panel's own pages (see assertSameOrigin), then there must be a signed-in user (anyone else
  * is sent to /login). Nothing else is read or done before both. Returns what the action needs to work as that user.
  */
-export async function beginAction(): Promise<{ db: Db; actor: Actor }> {
+export async function beginAction(): Promise<{ db: Db; actor: Actor; user: SafeUser }> {
   assertSameOrigin(await headers(), webConfig().panelOrigin)
   const user = await requireUser()
-  return { db: getDb(), actor: { id: user.id, role: user.role } }
+  return { db: getDb(), actor: { id: user.id, role: user.role }, user }
+}
+
+/**
+ * The start of every server action that only an admin may take (user administration, system settings), and the
+ * only way one starts: the same-origin check, then the signed-in user as in beginAction, who must be an admin. A
+ * member gets the 404 page, exactly as for the admin pages, whatever the action was asked to do.
+ */
+export async function beginAdminAction(): Promise<{ db: Db; actor: Actor; user: SafeUser }> {
+  assertSameOrigin(await headers(), webConfig().panelOrigin)
+  const user = await requireAdmin()
+  return { db: getDb(), actor: { id: user.id, role: user.role }, user }
 }

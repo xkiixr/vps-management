@@ -27,9 +27,9 @@ export async function getResourceSettings(db: Db): Promise<Partial<ResourceSetti
 
 // Both values are written in one transaction, so readers never see a max from one save and a budget from another.
 export async function setResourceSettings(db: Db, v: ResourceSettings, actorId: string): Promise<void> {
-  if (!isPositiveInteger(v.memoryBudgetMb)) throw new ValidationError('memory budget must be a whole number of MB')
+  if (!isPositiveInteger(v.memoryBudgetMb)) throw new ValidationError('memory budget must be a positive whole number of MB')
   if (!isPositiveInteger(v.maxServiceMemoryMb) || v.maxServiceMemoryMb < MIN_MEMORY_MB) {
-    throw new ValidationError(`max memory per service must be a whole number of at least ${MIN_MEMORY_MB} MB`)
+    throw new ValidationError(`max memory per service must be a positive whole number of at least ${MIN_MEMORY_MB} MB`)
   }
   if (v.maxServiceMemoryMb > v.memoryBudgetMb) {
     throw new ValidationError('max memory per service cannot be more than the memory budget')

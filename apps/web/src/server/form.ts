@@ -4,6 +4,12 @@ export function formText(form: FormData, name: string): string | undefined {
   return typeof value === 'string' ? value.trim() : undefined
 }
 
+/** A text field of a submitted form exactly as typed (a password may start or end with spaces). */
+export function formRawText(form: FormData, name: string): string | undefined {
+  const value = form.get(name)
+  return typeof value === 'string' ? value : undefined
+}
+
 /** The named text fields of a submitted form, trimmed. A field that is absent or not text is left out. */
 export function formTexts(form: FormData, names: readonly string[]): Record<string, string> {
   const texts: Record<string, string> = {}
