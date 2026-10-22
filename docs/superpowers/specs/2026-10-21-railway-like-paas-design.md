@@ -79,6 +79,7 @@
 - **ไม่มีค่าใช้จ่ายเพิ่ม (ตัดสินใจแล้ว):** ใช้ซอฟต์แวร์ open-source ฟรีเท่านั้น
 - **ติดตั้งด้วย `docker compose` (ผู้ออกแบบเลือก):** ตัวระบบเองติดตั้ง อัปเดต และย้ายเครื่องได้ด้วย compose file เดียว + ไฟล์ `.env`
 - **โดเมน:** ต้องมีโดเมนที่ตั้ง DNS ได้ ให้ panel อยู่โดเมนหนึ่ง (เช่น `panel.example.com`) และแอปอยู่ใต้ wildcard แยก (เช่น `*.apps.example.com`) ชี้มาที่ IP ของ VPS ทั้งสองค่าตั้งผ่าน env ห้าม hardcode ห้ามใช้ชื่อ/โดเมน/แบรนด์ของ Railway
+- **การติดตั้งจริงตอนนี้ (ตัดสินแล้ว 2026-10-22):** VPS ไม่มีโดเมนซื้อ ใช้ DuckDNS: แอปอยู่ที่ `*.itexcellence.duckdns.org` และ panel อยู่ที่ `panel.itexcellence.duckdns.org` ซึ่งเป็นโดเมนที่จดทะเบียนเดียวกัน (same-site) กับแอปของทีม เจ้าของโปรเจกต์เลือกเองแทนการแยกชื่อ DuckDNS → ต้องชดเชยด้วย: session cookie ชื่อขึ้นต้น `__Host-`, ทุก request ที่แก้ข้อมูลต้องตรวจ `Origin` ตรงกับ origin ของ panel แบบเป๊ะ (SameSite ป้องกันไม่ได้เพราะเป็น same-site), และชื่อ panel ห้ามถูกใช้เป็นโดเมนของแอป Traefik รันที่ port 8443 (port 80/443 เป็นของ Nginx Proxy Manager) ด้วย `docker-compose.dns-tls.yml`
 - **งบ RAM (ผู้ออกแบบเลือก, ค่าประมาณ):** ระบบควบคุม (Postgres + web + worker + Traefik) ≲ 1 GB, build ที่กำลังรัน ≲ 2–3 GB, ที่เหลือ ~4 GB สำหรับแอปและ database ของทีม → **build ทีละงานเท่านั้น** และทุก container ของผู้ใช้ต้องมี memory limit
 - **บังคับงบ RAM รวม (ผู้ออกแบบเลือก):** admin ตั้ง "งบ memory รวมของแอปผู้ใช้" (ค่าเริ่มต้น = RAM เครื่อง − 2.5 GB) และ "limit สูงสุดต่อ service" member เลือก limit ได้ไม่เกินค่าสูงสุดนั้น ก่อนเริ่ม deploy ระบบรวม limit ของทุก container ที่รันอยู่ + container ใหม่ (นับช่วงที่ตัวเก่าและตัวใหม่รันซ้อนกันด้วย) ถ้าเกินงบ **ปฏิเสธ deploy ทันที** พร้อมข้อความบอกว่าเกินเท่าไร ไม่เข้าคิวรอ ส่วนตัวระบบควบคุมตั้ง memory limit/reservation ของตัวเองแยกไว้ ไม่ให้แอปผู้ใช้แย่ง
 - **Disk (ผู้ออกแบบเลือก):** ยังไม่รู้ขนาด disk ค่า retention (image ย้อนหลัง, build cache, backup ในเครื่อง, log) ตั้งค่าได้ dashboard แสดงการใช้ disk และเตือน admin เมื่อเกิน 80%
@@ -198,7 +199,7 @@ AuditEvent (actorId, action, targetType, targetId, metadata, createdAt)
 - container ของผู้ใช้: ไม่มี `--privileged`, ไม่ mount Docker socket, ไม่ mount path ของ host (ยกเว้น named volume ของตัวเอง), `no-new-privileges`, drop capabilities ที่ไม่จำเป็น, มี memory/CPU/PID limit
 - ระบบควบคุมรันใน network ที่ container ผู้ใช้เข้าไม่ถึง
 - ทุก API ตรวจ role + การเป็นสมาชิก project ฝั่ง server
-- รหัสผ่านใช้ hash ที่ออกแบบมาสำหรับรหัสผ่าน (argon2/bcrypt), session cookie แบบ `HttpOnly` + `Secure` + host-only ผูกกับโดเมน panel
+- รหัสผ่านใช้ hash ที่ออกแบบมาสำหรับรหัสผ่าน (argon2/bcrypt), session cookie แบบ `HttpOnly` + `Secure` + host-only ผูกกับโดเมน panel และชื่อขึ้นต้น `__Host-` (กันแอปบน subdomain ข้างเคียงตั้ง cookie ทับ) ทุก mutation ตรวจ `Origin` ตรงกับ origin ของ panel
 - firewall (เช่น `ufw`) เปิดแค่ 22, 80, 443 และช่วง port ของ public TCP
 - **ความเสี่ยงที่ยอมรับ:** โค้ดของทีมรันระหว่าง build (เช่น `npm install` scripts) และ container ไม่ใช่กำแพงที่แข็งพอสำหรับคนที่ไม่ไว้ใจ ยอมรับได้เพราะผู้ใช้เป็นทีมภายใน ถ้าวันหนึ่งจะเปิดให้คนนอก ต้องทบทวนส่วนนี้ใหม่ทั้งหมด
 
