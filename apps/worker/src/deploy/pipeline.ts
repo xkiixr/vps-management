@@ -27,7 +27,7 @@ import { BuildError } from '../build/errors'
 import type { railpackPrepare } from '../build/railpack'
 import type { WorkerConfig } from '../config'
 import type { LineHandler, RunCommand } from '../exec'
-import { buildContainerSpec } from '../runtime/container-spec'
+import { buildContainerSpec, resourceLimitError } from '../runtime/container-spec'
 import type { DockerRuntime } from '../runtime/docker-runtime'
 import { type HealthMode, healthMode, type waitHealthy } from '../runtime/healthcheck'
 import { type fetchSource, githubCloneUrl, SourceError } from '../source/fetch-source'
@@ -61,6 +61,8 @@ type Image = { tag: string; snapshot: ConfigSnapshot }
 /** Gives Traefik time to pick up the rewritten routes file before the drain starts. */
 const ROUTES_RELOAD_MS = 3000
 const OLD_CONTAINER_STOP_TIMEOUT_SEC = 30
+/** Upper bound for the healthcheck that runs again after the private alias was attached. */
+const REPROBE_TIMEOUT_MS = 30_000
 
 /** A failure whose message is written for the user, like SourceError and BuildError. */
 class DeploymentFailure extends Error {}
@@ -85,11 +87,18 @@ const messageOf = (error: unknown) => (error instanceof Error ? error.message : 
  * the switch leaves the old container untouched, removes the new one and marks the deployment FAILED.
  */
 export async function runDeployment(deploymentId: string, deps: PipelineDeps): Promise<void> {
+  const token = deps.config.githubToken
+  const redact = (text: string) => (token ? text.replaceAll(token, '***') : text)
   let ctx: DeploymentContext
   try {
     ctx = await loadDeploymentContext(deps.db, deploymentId)
   } catch (error) {
-    console.error(`deployment ${deploymentId}: could not load it: ${messageOf(error)}`)
+    const message = redact(messageOf(error))
+    console.error(`deployment ${deploymentId}: could not load it: ${message}`)
+    // It is claimed, so the loop would never pick it up again. Best effort: the database may be what failed.
+    await setDeploymentStatus(deps.db, deploymentId, 'FAILED', { failureReason: `internal error: ${message}` }).catch(
+      () => undefined,
+    )
     return
   }
   if (ctx.deployment.status !== 'QUEUED') {
@@ -97,8 +106,6 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
     return
   }
 
-  const token = deps.config.githubToken
-  const redact = (text: string) => (token ? text.replaceAll(token, '***') : text)
   const sink = createLogSink(deps.db, ctx.deployment.id)
   const job: Job = {
     ctx,
@@ -123,7 +130,7 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
 
 async function execute(job: Job): Promise<void> {
   const target = job.ctx.deployment.trigger === 'rollback' ? rollbackTarget(job.ctx) : undefined
-  await checkBudget(job, target?.snapshot.deploy ?? job.ctx.instance.deploy)
+  await checkResources(job, target?.snapshot.deploy ?? job.ctx.instance.deploy)
   const image = target ? await startRollback(job, target) : await buildPhase(job)
   const name = await runPhase(job, image)
   await switchPhase(job, name)
@@ -134,7 +141,12 @@ async function transition(job: Job, to: DeploymentStatus, patch?: DeploymentPatc
   job.status = to
 }
 
-async function checkBudget(job: Job, deploy: DeployConfig): Promise<void> {
+/** Refuses limits Docker would not apply, and a deployment that does not fit the memory budget, before cloning. */
+async function checkResources(job: Job, deploy: DeployConfig): Promise<void> {
+  // buildContainerSpec refuses these too, but only after the whole build.
+  const invalid = resourceLimitError(deploy)
+  if (invalid !== undefined) throw new DeploymentFailure(invalid)
+
   const { docker, config } = job.deps
   const running = (await docker.listManaged()).filter((c) => c.running).map((c) => c.memoryMb)
   const budget = checkMemoryBudget({
@@ -276,13 +288,20 @@ async function runPhase(job: Job, image: Image): Promise<string> {
   job.container = name
 
   const mode = healthMode(deploy, ctx.domains.length > 0)
+  const target = { host: name, port: deploy.port, path: deploy.healthcheckPath, mode }
+  const state = () => docker.state(name)
+  const timeoutMs = deploy.healthcheckTimeoutSec * 1000
   job.log('deploy', `==> Healthcheck (${describeHealth(mode, deploy)})`)
-  const health = await deps.waitHealthy(
-    { host: name, port: deploy.port, path: deploy.healthcheckPath, mode },
-    { timeoutMs: deploy.healthcheckTimeoutSec * 1000, state: () => docker.state(name) },
-  )
+  const health = await deps.waitHealthy(target, { timeoutMs, state })
   if (!health.ok) throw new DeploymentFailure(health.reason)
-  await docker.attachAlias(name, net, [privateHostname(ctx.service.name)])
+
+  const alias = privateHostname(ctx.service.name)
+  await docker.attachAlias(name, net, [alias])
+  // Attaching the alias disconnects and reconnects the container, which can change its IP and drop its
+  // connections (an app bound to one address, like a Next.js standalone server, may stop answering).
+  job.log('deploy', `==> Healthcheck again after attaching ${alias}`)
+  const again = await deps.waitHealthy(target, { timeoutMs: Math.min(REPROBE_TIMEOUT_MS, timeoutMs), state })
+  if (!again.ok) throw new DeploymentFailure(again.reason)
   return name
 }
 

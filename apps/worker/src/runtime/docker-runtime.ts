@@ -28,7 +28,9 @@ export interface DockerRuntime {
   connect(containerName: string, networkName: string): Promise<void>
   /**
    * (Re)attaches a running container to `networkName` with exactly these DNS aliases: disconnects it
-   * from that network if it is on it, then connects it with the aliases. The container keeps running.
+   * from that network if it is on it, then connects it with the aliases. The container keeps running,
+   * but may get a new IP there and loses its open connections on that network, so callers check its
+   * health again afterwards.
    */
   attachAlias(containerName: string, networkName: string, aliases: string[]): Promise<void>
   run(spec: Dockerode.ContainerCreateOptions): Promise<void>

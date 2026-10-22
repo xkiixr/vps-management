@@ -8,8 +8,13 @@ export const MEMORY_LABEL = 'vpsm.memory-mb'
 
 const MIB = 1024 * 1024
 const PIDS_LIMIT = 512
-const MIN_MEMORY_MB = 6 // Docker refuses less
+export const MIN_MEMORY_MB = 6 // Docker refuses less
 const MIN_NANO_CPUS = 1e7 // 0.01 CPU
+/**
+ * When the host runs out of memory the kernel kills user apps (and builds) before the control plane:
+ * docker-compose.yml gives postgres, traefik and the worker -900.
+ */
+const OOM_SCORE_ADJ = 500
 // Docker's default capability set minus the ones a web app has no use for.
 const DROPPED_CAPABILITIES = ['NET_RAW', 'MKNOD', 'AUDIT_WRITE', 'SETFCAP', 'SETPCAP', 'SYS_CHROOT']
 
@@ -37,21 +42,31 @@ function restartPolicy(deploy: DeployConfig): Dockerode.HostConfig['RestartPolic
 }
 
 /**
- * The create options for one user container: resource limits, security baseline,
- * log rotation and restart policy. Nothing is published to the host and nothing
- * is bind-mounted; the container is reachable only through its network alias.
- * Throws on a memory or CPU limit that Docker would treat as "unlimited".
+ * Why Docker would refuse these limits or treat one as "unlimited", or `undefined` when they are fine.
+ * Docker reads Memory 0 and NanoCpus 0 as "unlimited" (NaN is serialised as null, i.e. 0), so never let one through.
  */
-export function buildContainerSpec(i: ContainerSpecInput): Dockerode.ContainerCreateOptions {
-  // Docker reads Memory 0 and NanoCpus 0 as "unlimited" (NaN is serialised as null, i.e. 0), so never let one through.
-  const { memoryLimitMB, cpuLimit } = i.deploy
+export function resourceLimitError({ memoryLimitMB, cpuLimit }: Pick<DeployConfig, 'memoryLimitMB' | 'cpuLimit'>): string | undefined {
   if (!Number.isInteger(memoryLimitMB) || memoryLimitMB < MIN_MEMORY_MB) {
-    throw new Error(`invalid memory limit: ${memoryLimitMB} MB (must be an integer of at least ${MIN_MEMORY_MB})`)
+    return `invalid memory limit: ${memoryLimitMB} MB (must be an integer of at least ${MIN_MEMORY_MB})`
   }
   const nanoCpus = Math.round(cpuLimit * 1e9)
   if (!Number.isFinite(nanoCpus) || nanoCpus < MIN_NANO_CPUS) {
-    throw new Error(`invalid CPU limit: ${cpuLimit} (must be at least ${MIN_NANO_CPUS / 1e9})`)
+    return `invalid CPU limit: ${cpuLimit} (must be at least ${MIN_NANO_CPUS / 1e9})`
   }
+  return undefined
+}
+
+/**
+ * The create options for one user container: resource limits, OOM priority, security
+ * baseline, log rotation and restart policy. Nothing is published to the host and nothing
+ * is bind-mounted; the container is reachable only through its network alias.
+ * Throws on a memory or CPU limit that Docker would treat as "unlimited" (see `resourceLimitError`).
+ */
+export function buildContainerSpec(i: ContainerSpecInput): Dockerode.ContainerCreateOptions {
+  const invalid = resourceLimitError(i.deploy)
+  if (invalid !== undefined) throw new Error(invalid)
+  const { memoryLimitMB, cpuLimit } = i.deploy
+  const nanoCpus = Math.round(cpuLimit * 1e9)
 
   const memory = memoryLimitMB * MIB
   return {
@@ -71,6 +86,7 @@ export function buildContainerSpec(i: ContainerSpecInput): Dockerode.ContainerCr
       Memory: memory,
       MemorySwap: memory, // equal to Memory: no swap
       NanoCpus: nanoCpus,
+      OomScoreAdj: OOM_SCORE_ADJ,
       PidsLimit: PIDS_LIMIT,
       Privileged: false,
       SecurityOpt: ['no-new-privileges:true'],

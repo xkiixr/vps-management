@@ -1,6 +1,6 @@
 import { DEFAULT_DEPLOY_CONFIG } from '@vpsm/core'
 import { describe, expect, test } from 'vitest'
-import { buildContainerSpec } from '../src/runtime/container-spec'
+import { buildContainerSpec, resourceLimitError } from '../src/runtime/container-spec'
 
 const input = {
   name: 'vpsm-web-12345678',
@@ -27,6 +27,11 @@ describe('buildContainerSpec', () => {
       NanoCpus: 1e9,
       PidsLimit: 512,
     })
+  })
+
+  test('makes user containers the first the kernel kills when memory runs out', () => {
+    // Positive: ahead of the control plane (postgres, traefik, worker run at -900).
+    expect(spec.HostConfig!.OomScoreAdj).toBe(500)
   })
 
   test('scales limits from the deploy config', () => {
@@ -91,6 +96,20 @@ describe('buildContainerSpec', () => {
     test('the smallest allowed limits still work', () => {
       const tiny = withDeploy({ memoryLimitMB: 6, cpuLimit: 0.01 })()
       expect(tiny.HostConfig).toMatchObject({ Memory: 6 * 1024 * 1024, MemorySwap: 6 * 1024 * 1024, NanoCpus: 1e7 })
+    })
+  })
+
+  describe('resourceLimitError (checked before a deployment clones anything)', () => {
+    test('is undefined for valid limits, including the smallest allowed', () => {
+      expect(resourceLimitError(DEFAULT_DEPLOY_CONFIG)).toBeUndefined()
+      expect(resourceLimitError({ memoryLimitMB: 6, cpuLimit: 0.01 })).toBeUndefined()
+    })
+
+    test('gives the same message buildContainerSpec throws', () => {
+      expect(resourceLimitError({ memoryLimitMB: 5, cpuLimit: 1 })).toBe('invalid memory limit: 5 MB (must be an integer of at least 6)')
+      expect(resourceLimitError({ memoryLimitMB: 512, cpuLimit: 0 })).toBe('invalid CPU limit: 0 (must be at least 0.01)')
+      // The memory limit is reported first.
+      expect(resourceLimitError({ memoryLimitMB: NaN, cpuLimit: 0 })).toBe('invalid memory limit: NaN MB (must be an integer of at least 6)')
     })
   })
 })

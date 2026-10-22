@@ -5,6 +5,7 @@ import { asc, eq } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { DEFAULT_DEPLOY_CONFIG, type DeployConfig, type DeploymentTrigger } from '@vpsm/core'
 import {
+  claimNextDeployment,
   createAppService,
   createProject,
   type Deployment,
@@ -26,6 +27,8 @@ import { fakeDeps, type FakeDeps } from './fakes'
 // Every status a deployment was asked to move to, starting from QUEUED. Recorded before the real call,
 // so an invalid transition the pipeline attempts shows up here too.
 const history = vi.hoisted(() => new Map<string, string[]>())
+// Set to make the next loadDeploymentContext call throw this error.
+const loadFailure = vi.hoisted(() => ({ error: undefined as Error | undefined }))
 
 vi.mock('@vpsm/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@vpsm/db')>()
@@ -41,6 +44,12 @@ vi.mock('@vpsm/db', async (importOriginal) => {
       if (args[1].previousId !== undefined) record(args[1].previousId, 'REMOVED')
       return actual.markDeploymentLive(...args)
     },
+    loadDeploymentContext: async (...args: Parameters<typeof actual.loadDeploymentContext>) => {
+      const error = loadFailure.error
+      loadFailure.error = undefined
+      if (error) throw error
+      return actual.loadDeploymentContext(...args)
+    },
   }
 })
 
@@ -54,6 +63,7 @@ afterAll(() => t.close())
 beforeEach(async () => {
   await t.reset()
   history.clear()
+  loadFailure.error = undefined
   await createProject(db, 'shop')
   const { instance } = await createAppService(db, {
     projectName: 'shop',
@@ -143,6 +153,8 @@ describe('happy path', () => {
       'run vpsm-web-' + d.id.slice(0, 8),
       'health',
       `alias vpsm-web-${d.id.slice(0, 8)} web.internal`,
+      // Attaching the alias reconnects the container to the network, so it is probed again.
+      'health',
       'routes',
       'cleanup',
     ])
@@ -177,6 +189,7 @@ describe('happy path', () => {
       ['build', '==> Building with railpack'],
       ['deploy', '==> Starting container'],
       ['deploy', '==> Healthcheck (http /health)'],
+      ['deploy', '==> Healthcheck again after attaching web.internal'],
       ['deploy', '==> Live at https://web-shop.apps.example.com'],
     ])
   })
@@ -307,11 +320,13 @@ describe('happy path', () => {
     await runDeployment(d.id, deps)
 
     // Until then `web.internal` resolves only to the old container (if any), never to an unready one.
-    expect(aliasesDuringHealthcheck).toEqual([[]])
+    // The second healthcheck runs after the reconnect that attached the alias.
+    expect(aliasesDuringHealthcheck).toEqual([[], ['web.internal']])
     expect(deps.docker.aliasesOf(nameOf(d), net)).toEqual(['web.internal'])
     const e = deps.events
     expect(e.indexOf('health')).toBeLessThan(e.indexOf(`alias ${nameOf(d)} web.internal`))
-    expect(e.indexOf(`alias ${nameOf(d)} web.internal`)).toBeLessThan(e.indexOf('routes'))
+    expect(e.lastIndexOf('health')).toBeGreaterThan(e.indexOf(`alias ${nameOf(d)} web.internal`))
+    expect(e.lastIndexOf('health')).toBeLessThan(e.indexOf('routes'))
   })
 
   test('the public domain is the alphabetically first one', async () => {
@@ -330,12 +345,33 @@ describe('happy path', () => {
 
     await runDeployment(d.id, deps)
 
+    expect(health).toHaveBeenCalledTimes(2)
     const [target, options] = health.mock.calls[0]!
     expect(target).toEqual({ host: nameOf(d), port: 3000, path: undefined, mode: 'tcp' })
     expect(options.timeoutMs).toBe(60_000)
     deps.docker.setState(nameOf(d), { restartCount: 7 })
     expect((await options.state()).restartCount).toBe(7)
     expect(await logLines(d.id)).toContain('==> Healthcheck (tcp port 3000)')
+    // After the alias reconnect: the same probe, for at most 30 s.
+    const [againTarget, againOptions] = health.mock.calls[1]!
+    expect(againTarget).toEqual(target)
+    expect(againOptions.timeoutMs).toBe(30_000)
+    expect((await againOptions.state()).restartCount).toBe(7)
+  })
+
+  test('the healthcheck after the alias reconnect keeps a shorter configured timeout', async () => {
+    await setDeploy({ healthcheckPath: '/health', healthcheckTimeoutSec: 10 })
+    const health = vi.fn(deps.waitHealthy)
+    deps.waitHealthy = health
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    expect(health.mock.calls.map(([target, options]) => [target.mode, options.timeoutMs])).toEqual([
+      ['http', 10_000],
+      ['http', 10_000],
+    ])
+    expect((await get(d.id)).status).toBe('SUCCESS')
   })
 
   test('a service without a domain gets no public hostname and a running-only healthcheck', async () => {
@@ -372,6 +408,7 @@ describe('redeploy', () => {
       `run ${nameOf(d2)}`,
       'health',
       `alias ${nameOf(d2)} web.internal`,
+      'health',
       'routes',
       'sleep 3000',
       'sleep 10000',
@@ -426,6 +463,27 @@ describe('failures', () => {
     expect(await logLines(d2.id)).toContain('==> Deployment failed: healthcheck timed out after 300s (last error: ECONNREFUSED)')
   })
 
+  test('a failed healthcheck after the alias reconnect fails the deployment, old container keeps serving', async () => {
+    const previous = await liveDeployment('vpsm-web-old00000')
+    const d2 = await queue()
+    const newName = nameOf(d2)
+    let probes = 0
+    deps.waitHealthy = async () => {
+      deps.events.push('health')
+      return ++probes === 1 ? { ok: true } : { ok: false, reason: 'healthcheck timed out after 30s (last error: ECONNREFUSED)' }
+    }
+
+    await runDeployment(d2.id, deps)
+
+    expect(await get(d2.id)).toMatchObject({ status: 'FAILED', failureReason: 'healthcheck timed out after 30s (last error: ECONNREFUSED)' })
+    expect(await statusHistory(d2.id)).toEqual(['QUEUED', 'BUILDING', 'DEPLOYING', 'FAILED'])
+    expect(deps.events).toEqual(['fetch', 'build', `run ${newName}`, 'health', `alias ${newName} web.internal`, 'health', `stop ${newName}`])
+    expect(deps.docker.has(newName)).toBe(false)
+    expect((await get(previous.id)).status).toBe('SUCCESS')
+    expect(deps.docker.has('vpsm-web-old00000')).toBe(true)
+    expect(await logLines(d2.id)).toContain('==> Deployment failed: healthcheck timed out after 30s (last error: ECONNREFUSED)')
+  })
+
   test('build failure stops before any container is created', async () => {
     const d = await queue()
     deps.buildImage = async () => {
@@ -474,14 +532,28 @@ describe('failures', () => {
     expect(deps.events).toEqual([])
   })
 
-  test('an invalid resource limit fails as an internal error before any container runs', async () => {
-    await setDeploy({ cpuLimit: 0 })
+  test.each([
+    [{ cpuLimit: 0 }, 'invalid CPU limit: 0 (must be at least 0.01)'],
+    [{ memoryLimitMB: 5 }, 'invalid memory limit: 5 MB (must be an integer of at least 6)'],
+    [{ memoryLimitMB: 256.5 }, 'invalid memory limit: 256.5 MB (must be an integer of at least 6)'],
+  ] as const)('an invalid resource limit %o is refused before cloning', async (limits, reason) => {
+    await setDeploy(limits)
     const d = await queue()
     await runDeployment(d.id, deps)
-    expect(await get(d.id)).toMatchObject({ status: 'FAILED', failureReason: 'internal error: invalid CPU limit: 0 (must be at least 0.01)' })
-    expect(deps.events.some((e) => e.startsWith('run '))).toBe(false)
+    expect(await get(d.id)).toMatchObject({ status: 'FAILED', failureReason: reason })
+    expect(deps.events).toEqual([])
     expect(await deps.docker.listManaged()).toEqual([])
-    expect(await statusHistory(d.id)).toEqual(['QUEUED', 'BUILDING', 'DEPLOYING', 'FAILED'])
+    expect(await statusHistory(d.id)).toEqual(['QUEUED', 'FAILED'])
+  })
+
+  test('a rollback to a snapshot with an invalid resource limit is refused before any container runs', async () => {
+    const old = await liveDeployment('vpsm-web-old00000', { imageTag: 'vpsm/si:old', deploy: { cpuLimit: 0.001 }, running: false })
+    deps.docker.existingImages.add('vpsm/si:old')
+    const rb = await queue('rollback', { rollbackOfId: old.id })
+    await runDeployment(rb.id, deps)
+    expect(await get(rb.id)).toMatchObject({ status: 'FAILED', failureReason: 'invalid CPU limit: 0.001 (must be at least 0.01)' })
+    expect(deps.events).toEqual([])
+    expect(await statusHistory(rb.id)).toEqual(['QUEUED', 'FAILED'])
   })
 
   test('a docker error during the healthcheck fails as an internal error and removes the new container', async () => {
@@ -530,6 +602,7 @@ describe('failures', () => {
 
     expect(attempts).toBe(3)
     expect(deps.events.slice(deps.events.indexOf(`alias ${nameOf(d2)} web.internal`) + 1)).toEqual([
+      'health',
       'sleep 1000',
       'sleep 2000',
       'routes',
@@ -585,6 +658,22 @@ describe('failures', () => {
     }
   })
 
+  test('a deployment whose context cannot be loaded is marked FAILED instead of staying claimed', async () => {
+    const d = await queue()
+    expect((await claimNextDeployment(db))?.id).toBe(d.id)
+    loadFailure.error = new Error('Connection terminated unexpectedly')
+    const error = silenceConsoleError()
+    try {
+      await runDeployment(d.id, deps)
+      expect(await get(d.id)).toMatchObject({ status: 'FAILED', failureReason: 'internal error: Connection terminated unexpectedly' })
+      expect(await statusHistory(d.id)).toEqual(['QUEUED', 'FAILED'])
+      expect(deps.events).toEqual([])
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('Connection terminated unexpectedly'))
+    } finally {
+      error.mockRestore()
+    }
+  })
+
   test('an unknown deployment is reported, not thrown', async () => {
     const error = silenceConsoleError()
     try {
@@ -629,6 +718,7 @@ describe('rollback', () => {
       `run ${nameOf(rb)}`,
       'health',
       `alias ${nameOf(rb)} web.internal`,
+      'health',
       'routes',
       'sleep 3000',
       'sleep 10000',
@@ -671,8 +761,11 @@ describe('rollback', () => {
     expect(spec.Env).toContain('PORT=3000')
     expect(spec.HostConfig?.Memory).toBe(256 * 1024 * 1024)
     expect(spec.Cmd).toEqual(['sh', '-c', 'node old.js'])
-    expect(health.mock.calls[0]![0]).toEqual({ host: nameOf(rb), port: 3000, path: '/old-health', mode: 'http' })
-    expect(health.mock.calls[0]![1].timeoutMs).toBe(30_000)
+    expect(health.mock.calls.map(([target]) => target)).toEqual([
+      { host: nameOf(rb), port: 3000, path: '/old-health', mode: 'http' },
+      { host: nameOf(rb), port: 3000, path: '/old-health', mode: 'http' },
+    ])
+    expect(health.mock.calls.map(([, options]) => options.timeoutMs)).toEqual([30_000, 30_000])
   })
 
   test('rollback fails clearly when image was cleaned up', async () => {
