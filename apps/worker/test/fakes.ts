@@ -43,7 +43,8 @@ export class FakeDocker implements DockerRuntime {
   /** Per container: the networks it is on, each with its aliases there. */
   private readonly endpoints = new Map<string, Map<string, string[]>>()
   private readonly specs: Dockerode.ContainerCreateOptions[] = []
-  private readonly dieListeners = new Set<(name: string) => void>()
+  /** One entry per `onContainerDie` subscription (the same callback may subscribe more than once). */
+  private readonly dieSubscriptions = new Set<{ cb: (name: string) => void; onError?: (err: Error) => void }>()
   private seeded = 0
 
   constructor(readonly events: string[] = []) {}
@@ -90,7 +91,17 @@ export class FakeDocker implements DockerRuntime {
   }
 
   emitDie(name: string): void {
-    for (const cb of this.dieListeners) cb(name)
+    for (const { cb } of [...this.dieSubscriptions]) cb(name)
+  }
+
+  /** Breaks the event stream of every current `onContainerDie` subscription, like a daemon restart. */
+  failEventStream(err: Error): void {
+    for (const { onError } of [...this.dieSubscriptions]) onError?.(err)
+  }
+
+  /** How many `onContainerDie` subscriptions are open. */
+  get dieSubscribers(): number {
+    return this.dieSubscriptions.size
   }
 
   async ensureNetwork(name: string): Promise<void> {
@@ -165,9 +176,12 @@ export class FakeDocker implements DockerRuntime {
     this.existingImages.delete(tag)
   }
 
-  onContainerDie(cb: (name: string) => void): () => void {
-    this.dieListeners.add(cb)
-    return () => this.dieListeners.delete(cb)
+  onContainerDie(cb: (name: string) => void, onError?: (err: Error) => void): () => void {
+    const subscription = { cb, onError }
+    this.dieSubscriptions.add(subscription)
+    return () => {
+      this.dieSubscriptions.delete(subscription)
+    }
   }
 }
 
