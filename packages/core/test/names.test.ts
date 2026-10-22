@@ -34,6 +34,7 @@ test('docker names use vpsm prefix', () => {
   expect(imageTag('si1', 'd1')).toBe('vpsm/si1:d1')
   expect(privateHostname('api')).toBe('api.internal')
 })
+
 test('publicUrl omits the port 443 and keeps any other port', () => {
   expect(publicUrl('web-shop.apps.example.com', 443)).toBe('https://web-shop.apps.example.com')
   expect(publicUrl('web-shop.apps.example.com', 8443)).toBe('https://web-shop.apps.example.com:8443')

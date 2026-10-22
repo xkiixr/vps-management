@@ -2,22 +2,22 @@
 # Traefik then listens on one alternate HTTPS port only, and gets a single wildcard certificate
 # (*.APPS_DOMAIN) from Let's Encrypt through the DNS-01 challenge at DuckDNS, which needs no port 80.
 # DuckDNS keeps one TXT record at a time, so the certificate has no extra names (SANs).
+# APPS_DOMAIN must therefore be a DuckDNS name (xxx.duckdns.org).
 #
-# Use it on top of docker-compose.yml, usually by setting this in .env:
+# Needs Docker Compose 2.24.0 or newer (`!override`). Turn it on with this line in .env:
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.dns-tls.yml
-#   TLS_MODE=dns-wildcard
-#   PUBLIC_HTTPS_PORT=8443
-#   TRAEFIK_HTTPS_PORT=8443
+# and put the DuckDNS token in .duckdns.env (next to this file, chmod 600, never committed):
 #   DUCKDNS_TOKEN=<token from your duckdns.org account>
-# See docs/operations.md.
+# TRAEFIK_HTTPS_PORT (default 8443) in .env changes the port. See docs/operations.md.
 services:
   traefik:
     # !override replaces the lists of docker-compose.yml instead of appending to them,
     # so neither port 80 nor 443 stays published.
     ports: !override
       - '${TRAEFIK_HTTPS_PORT:-8443}:443'
-    environment:
-      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:?DUCKDNS_TOKEN is required}
+    # The token is read from its own file and goes to Traefik only (the worker uses env_file: .env).
+    env_file:
+      - .duckdns.env
     # No web entrypoint (nothing listens on 80) and no HTTP challenge. The websecure entrypoint asks for
     # the wildcard certificate itself; the routers written by the worker (TLS_MODE=dns-wildcard) have no
     # tls section of their own, which is what makes them inherit the entrypoint's resolver and domains.
@@ -31,3 +31,10 @@ services:
       - --certificatesresolvers.le.acme.storage=/acme/acme.json
       - --certificatesresolvers.le.acme.dnschallenge.provider=duckdns
       - --log.level=INFO
+
+  worker:
+    # Only this override turns the mode on, so the worker cannot disagree with Traefik about it. `environment`
+    # wins over `env_file: .env`. The worker prints app URLs with this port.
+    environment:
+      TLS_MODE: dns-wildcard
+      PUBLIC_HTTPS_PORT: ${TRAEFIK_HTTPS_PORT:-8443}

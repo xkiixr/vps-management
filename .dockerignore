@@ -5,6 +5,7 @@
 **/dist
 **/.env
 **/.env.*
+**/.duckdns.env
 !.env.example
 docs
 examples

@@ -58,10 +58,19 @@ const fields = z.object({
   GITHUB_TOKEN: z.string().optional(),
 })
 
+const DUCKDNS_SUFFIX = '.duckdns.org'
+
 const schema = fields.superRefine((e, ctx) => {
-  if (!path.isAbsolute(e.WORK_DIR) || !path.isAbsolute(e.TRAEFIK_DYNAMIC_DIR)) return
-  if (overlaps(e.WORK_DIR, e.TRAEFIK_DYNAMIC_DIR)) {
+  if (path.isAbsolute(e.WORK_DIR) && path.isAbsolute(e.TRAEFIK_DYNAMIC_DIR) && overlaps(e.WORK_DIR, e.TRAEFIK_DYNAMIC_DIR)) {
     ctx.addIssue({ code: 'custom', path: ['WORK_DIR'], message: 'must not be, contain or be inside TRAEFIK_DYNAMIC_DIR' })
+  }
+  // docker-compose.dns-tls.yml sets both together; without it the apps are on the standard port with a certificate per host.
+  if (e.TLS_MODE === 'http01' && e.PUBLIC_HTTPS_PORT !== 443) {
+    ctx.addIssue({ code: 'custom', path: ['PUBLIC_HTTPS_PORT'], message: 'must be 443 unless TLS_MODE is dns-wildcard' })
+  }
+  // The wildcard certificate is ordered with the DuckDNS DNS-01 challenge.
+  if (e.TLS_MODE === 'dns-wildcard' && typeof e.APPS_DOMAIN === 'string' && !e.APPS_DOMAIN.endsWith(DUCKDNS_SUFFIX)) {
+    ctx.addIssue({ code: 'custom', path: ['APPS_DOMAIN'], message: `must end with ${DUCKDNS_SUFFIX} when TLS_MODE is dns-wildcard` })
   }
 })
 

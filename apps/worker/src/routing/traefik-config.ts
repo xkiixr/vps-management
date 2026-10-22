@@ -2,6 +2,7 @@ import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isValidHostname } from '@vpsm/core'
 import { stringify } from 'yaml'
+import type { WorkerConfig } from '../config'
 
 export type Route = { serviceInstanceId: string; hostnames: string[]; upstreamUrl: string }
 
@@ -31,11 +32,15 @@ export function validateRoute(route: Route): void {
 
 export type RoutesTls = 'resolver' | 'entrypoint'
 
+export const routesTlsFor = (config: Pick<WorkerConfig, 'tlsMode'>): RoutesTls =>
+  config.tlsMode === 'dns-wildcard' ? 'entrypoint' : 'resolver'
+
 /**
  * `tls: 'resolver'` (default) has each router request its own certificate from the `le` resolver.
  * `tls: 'entrypoint'` writes routers without a `tls` section: Traefik applies the entrypoint's TLS defaults
  * (certresolver and domains, i.e. the wildcard certificate) only to routers that have none. A router with
  * even an empty `tls: {}` counts as configured on its own and would get neither.
+ * Only hostnames under `*.<APPS_DOMAIN>` get a valid certificate this way (custom domains will need router-level TLS).
  */
 export function renderRoutesYaml(routes: Route[], options: { tls?: RoutesTls } = {}): string {
   // Traefik rejects a file whose routers and services are all empty ("routers cannot be a standalone

@@ -12,6 +12,7 @@ import { cleanupImages } from './images/retention'
 import { startCrashMonitor } from './monitor/crash-monitor'
 import { ensureNetworkAttachments } from './monitor/network-attachments'
 import { regenerateRoutes } from './routing/active-routes'
+import { routesTlsFor } from './routing/traefik-config'
 import { createDockerRuntime } from './runtime/docker-runtime'
 import { waitHealthy } from './runtime/healthcheck'
 import { fetchSource } from './source/fetch-source'
@@ -45,9 +46,7 @@ async function main(): Promise<void> {
     railpackPrepare,
     buildImage,
     waitHealthy,
-    // In dns-wildcard mode the entrypoint requests the one wildcard certificate; routers inherit it by having no tls section.
-    regenerateRoutes: () =>
-      regenerateRoutes(db, config.traefikDynamicDir, undefined, config.tlsMode === 'dns-wildcard' ? 'entrypoint' : 'resolver'),
+    regenerateRoutes: () => regenerateRoutes(db, config.traefikDynamicDir, undefined, routesTlsFor(config)),
     cleanupImages: async (serviceInstanceId) => {
       const removed = await cleanupImages({ db, docker, config }, serviceInstanceId)
       if (removed.length > 0) console.log(`removed ${removed.length} old image(s): ${removed.join(', ')}`)

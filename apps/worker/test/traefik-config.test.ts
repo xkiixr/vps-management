@@ -2,7 +2,7 @@ import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test } from 'vitest'
-import { renderRoutesYaml, validateRoute, writeRoutesFile } from '../src/routing/traefik-config'
+import { renderRoutesYaml, routesTlsFor, validateRoute, writeRoutesFile } from '../src/routing/traefik-config'
 
 test('renders router and service per instance', () => {
   expect(
@@ -26,6 +26,11 @@ test('renders router and service per instance', () => {
           - url: http://vpsm-web-12345678:8080
 `,
   )
+})
+
+test('routesTlsFor maps the TLS mode to the way routers get their certificate', () => {
+  expect(routesTlsFor({ tlsMode: 'http01' })).toBe('resolver')
+  expect(routesTlsFor({ tlsMode: 'dns-wildcard' })).toBe('entrypoint')
 })
 
 test("the 'resolver' option renders what the default renders", () => {

@@ -34,7 +34,7 @@ test('every default', () => {
 test('reads every variable from the environment', () => {
   expect(
     loadConfig({
-      APPS_DOMAIN: 'paas.example.org',
+      APPS_DOMAIN: 'paas.duckdns.org',
       TRAEFIK_DYNAMIC_DIR: '/etc/traefik/dyn',
       TRAEFIK_CONTAINER: 'my-traefik',
       WORKER_CONTAINER: 'my-worker',
@@ -50,7 +50,7 @@ test('reads every variable from the environment', () => {
       GITHUB_TOKEN: 'ghs_abc',
     }),
   ).toEqual({
-    appsDomain: 'paas.example.org',
+    appsDomain: 'paas.duckdns.org',
     traefikDynamicDir: '/etc/traefik/dyn',
     traefikContainer: 'my-traefik',
     workerContainer: 'my-worker',
@@ -101,11 +101,62 @@ test.each([
 
 test('TLS_MODE accepts both modes and PUBLIC_HTTPS_PORT the whole port range', () => {
   const load = (env: Record<string, string>) => loadConfig({ APPS_DOMAIN: 'apps.example.com', ...env })
+  const wildcard = { TLS_MODE: 'dns-wildcard', APPS_DOMAIN: 'apps.duckdns.org' }
   expect(load({ TLS_MODE: 'http01' }).tlsMode).toBe('http01')
-  expect(load({ TLS_MODE: 'dns-wildcard' }).tlsMode).toBe('dns-wildcard')
-  expect(load({ PUBLIC_HTTPS_PORT: '1' }).publicHttpsPort).toBe(1)
-  expect(load({ PUBLIC_HTTPS_PORT: '65535' }).publicHttpsPort).toBe(65535)
+  expect(load(wildcard).tlsMode).toBe('dns-wildcard')
+  expect(load({ ...wildcard, PUBLIC_HTTPS_PORT: '1' }).publicHttpsPort).toBe(1)
+  expect(load({ ...wildcard, PUBLIC_HTTPS_PORT: '65535' }).publicHttpsPort).toBe(65535)
   expect(load({ TLS_MODE: '', PUBLIC_HTTPS_PORT: '' })).toMatchObject({ tlsMode: 'http01', publicHttpsPort: 443 })
+  expect(load({ TLS_MODE: 'http01', PUBLIC_HTTPS_PORT: '443' })).toMatchObject({ tlsMode: 'http01', publicHttpsPort: 443 })
+})
+
+describe('the TLS settings only make sense together', () => {
+  const load = (env: Record<string, string>) => () => loadConfig({ APPS_DOMAIN: 'apps.example.com', ...env })
+
+  test.each(['1', '80', '8443', '65535'])('http01 with PUBLIC_HTTPS_PORT=%s is rejected', (port) => {
+    expect(load({ PUBLIC_HTTPS_PORT: port })).toThrow(/^invalid worker configuration: PUBLIC_HTTPS_PORT .*TLS_MODE/)
+    expect(load({ TLS_MODE: 'http01', PUBLIC_HTTPS_PORT: port })).toThrow(/PUBLIC_HTTPS_PORT/)
+  })
+
+  test('dns-wildcard accepts port 443 as well as another port', () => {
+    const env = { TLS_MODE: 'dns-wildcard', APPS_DOMAIN: 'apps.duckdns.org' }
+    expect(load({ ...env, PUBLIC_HTTPS_PORT: '443' })().publicHttpsPort).toBe(443)
+    expect(load({ ...env, PUBLIC_HTTPS_PORT: '8443' })().publicHttpsPort).toBe(8443)
+    expect(load(env)().publicHttpsPort).toBe(443)
+  })
+
+  test.each(['apps.example.com', 'duckdns.org', 'apps.duckdns.org.example.com', 'apps-duckdns.org', 'xduckdns.org'])(
+    'dns-wildcard with APPS_DOMAIN=%s (not a DuckDNS name) is rejected',
+    (domain) => {
+      expect(load({ TLS_MODE: 'dns-wildcard', PUBLIC_HTTPS_PORT: '8443', APPS_DOMAIN: domain })).toThrow(
+        /^invalid worker configuration: APPS_DOMAIN .*TLS_MODE/,
+      )
+    },
+  )
+
+  test('http01 does not care which domain it is', () => {
+    expect(load({ APPS_DOMAIN: 'apps.duckdns.org' })().tlsMode).toBe('http01')
+  })
+
+  test('the errors name the variables without echoing any value', () => {
+    let message = ''
+    try {
+      loadConfig({ APPS_DOMAIN: 'secretish.example.com', TLS_MODE: 'dns-wildcard', PUBLIC_HTTPS_PORT: '9999' })
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toMatch(/APPS_DOMAIN/)
+    expect(message).toMatch(/TLS_MODE/)
+    expect(message).not.toContain('secretish')
+    expect(message).not.toContain('9999')
+    try {
+      loadConfig({ APPS_DOMAIN: 'apps.example.com', PUBLIC_HTTPS_PORT: '9999' })
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toMatch(/PUBLIC_HTTPS_PORT/)
+    expect(message).not.toContain('9999')
+  })
 })
 
 test('the error never contains the token', () => {
