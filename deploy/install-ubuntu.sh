@@ -44,4 +44,4 @@ ufw allow 443/tcp
 ufw --force enable
 
 echo "Done. Docker $(docker --version | cut -d' ' -f3 | tr -d ,) is installed; ufw allows SSH, 80/tcp and 443/tcp."
-echo "Next: cp .env.example .env, fill it in, then docker compose up -d --build"
+echo "Next: cp .env.example .env, fill it in, then sudo docker compose up -d --build (see docs/operations.md about swap)"

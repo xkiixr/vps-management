@@ -1,10 +1,24 @@
 name: vpsm
 
+# The control plane's own logs are rotated like the apps' (10 MB x 3 per container).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+# The memory limits of everything together exceed 8 GB by design (see docs/operations.md). When the host
+# runs out, the kernel must kill a user app (oom_score_adj 500) or a build (0) before the control plane, so
+# postgres, traefik and the worker get -900, plus a reservation (cgroup memory.low) the kernel avoids
+# reclaiming from them under pressure.
 services:
   postgres:
     image: postgres:18
     restart: unless-stopped
     mem_limit: 512m
+    mem_reservation: 256m
+    oom_score_adj: -900
+    logging: *logging
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
@@ -23,6 +37,9 @@ services:
     container_name: vpsm-traefik
     restart: unless-stopped
     mem_limit: 256m
+    mem_reservation: 64m
+    oom_score_adj: -900
+    logging: *logging
     ports:
       - '80:80'
       - '443:443'
@@ -54,6 +71,9 @@ services:
     # A minimal init as PID 1 reaps the git, railpack and docker processes the worker spawns.
     init: true
     mem_limit: 768m
+    mem_reservation: 256m
+    oom_score_adj: -900
+    logging: *logging
     stop_grace_period: 60s
     env_file: .env
     volumes:
