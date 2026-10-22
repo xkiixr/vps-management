@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { configChangedSinceLiveDeploy, findProjectFor, findService } from '@vpsm/db'
+import { configChangedSinceLiveDeploy, findProjectFor, findService, listDeployments } from '@vpsm/db'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -12,9 +12,14 @@ import { getDb } from '@/server/db'
 import { requireUser } from '@/server/guards'
 import { maxServiceMemoryMb } from '@/server/limits'
 import { DeleteServiceForm } from './delete-service-form'
+import { DeployActions } from './deploy-actions'
+import { DeploymentsTable } from './deployments-table'
 import { type ServiceSettings, SettingsForm } from './settings-form'
 
 type Props = { params: Promise<{ project: string; service: string }> }
+
+/** How many of the latest deployments the Deployments tab lists. */
+const DEPLOYMENTS_SHOWN = 50
 
 // Only what the address already says, so it is the same whether or not the service exists or is visible.
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
@@ -32,7 +37,10 @@ export default async function ServicePage({ params }: Props) {
   if (!project) notFound()
   const row = await findService(db, project.id, serviceName, { httpsPort })
   if (!row) notFound()
-  const maxMemoryMb = await maxServiceMemoryMb(db)
+  const [maxMemoryMb, deployments] = await Promise.all([
+    maxServiceMemoryMb(db),
+    listDeployments(db, row.instance.id, DEPLOYMENTS_SHOWN),
+  ])
 
   const { service, instance, url, latest } = row
   // Only these settings go to the browser, as text for the form.
@@ -87,12 +95,21 @@ export default async function ServicePage({ params }: Props) {
           <TabsTrigger value="danger">Danger zone</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="deployments" className="mt-4">
+        <TabsContent value="deployments" className="mt-4 grid gap-4">
+          <DeployActions projectName={project.name} serviceName={service.name} canRestart={row.live !== null} />
           <Card>
             <CardContent>
-              <p className="py-6 text-center text-sm text-muted-foreground">The deployment history and logs will show here.</p>
+              <DeploymentsTable
+                projectName={project.name}
+                serviceName={service.name}
+                deployments={deployments}
+                liveId={row.live?.id ?? null}
+              />
             </CardContent>
           </Card>
+          {deployments.length === DEPLOYMENTS_SHOWN && (
+            <p className="text-sm text-muted-foreground">Showing the latest {DEPLOYMENTS_SHOWN} deployments.</p>
+          )}
         </TabsContent>
 
         <TabsContent value="settings" className="mt-4">

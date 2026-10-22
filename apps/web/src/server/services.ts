@@ -62,7 +62,8 @@ export type SettingsInput = Partial<Record<ServiceField, string>> & {
 /** Where the dashboard is served from: the generated address of a service is `<service>-<project>.<appsDomain>`. */
 export type Site = { appsDomain: string; httpsPort: number }
 
-async function visibleService(
+/** The project and the production service of that name when the actor may see them, else NotFoundError. */
+export async function visibleService(
   db: Db,
   actor: Actor,
   projectName: string,

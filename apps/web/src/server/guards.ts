@@ -43,6 +43,17 @@ export const currentUser = cache(async (): Promise<SafeUser | null> => {
   return resolveSessionUser(getDb(), jar)
 })
 
+/**
+ * The signed-in user of a route handler that answers a read (GET) with JSON, or null: the handler answers 401
+ * itself, because a redirect to the login page is no use to a script. It sets no cookie. proxy.ts has renewed the
+ * session and its cookie before any GET gets here, so there is nothing for the handler to add, and a poll
+ * should not carry a Set-Cookie of its own.
+ */
+export async function apiUser(): Promise<SafeUser | null> {
+  const store = await cookies()
+  return resolveSessionUser(getDb(), { get: (name) => store.get(name), set: () => {} })
+}
+
 /** The signed-in user; anyone else is redirected to /login. */
 export async function requireUser(): Promise<SafeUser> {
   return ensureUser(await currentUser())

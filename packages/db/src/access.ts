@@ -1,9 +1,20 @@
-import { and, asc, count, eq, inArray, type SQL } from 'drizzle-orm'
+import { and, asc, count, eq, getTableColumns, inArray, type SQL } from 'drizzle-orm'
 import { validateName } from '@vpsm/core'
 import type { Db } from './client'
 import { ValidationError } from './errors'
 import { CONTROL_CHARACTERS, isUuid, normalizeEmail } from './input'
-import { type Project, projectMembers, projects, services, type User, users } from './schema'
+import {
+  type Deployment,
+  deployments,
+  type Project,
+  projectMembers,
+  projects,
+  type Service,
+  serviceInstances,
+  services,
+  type User,
+  users,
+} from './schema'
 
 // Who is asking. Admins see every project; anyone else only the projects they are a member of.
 export type Actor = { id: string; role: 'admin' | 'member' }
@@ -41,6 +52,33 @@ export async function findProjectFor(db: Db, actor: Actor, projectName: string):
     .from(projects)
     .where(and(eq(projects.name, projectName), visible))
   return project ?? null
+}
+
+/**
+ * A deployment with its project and service, found from its id alone (a URL that carries nothing else), when the
+ * actor may see its project. A deployment that does not exist, and one in a project the actor may not see, both
+ * give null. Only the creator's email is joined in (null for a push, or when the creator was deleted).
+ */
+export async function findDeploymentFor(
+  db: Db,
+  actor: Actor,
+  deploymentId: string,
+): Promise<{ deployment: Deployment & { createdByEmail: string | null }; project: Project; service: Service } | null> {
+  const visible = visibleTo(db, actor)
+  if (visible === false || !isUuid(deploymentId)) return null
+  const [row] = await db
+    .select({
+      deployment: { ...getTableColumns(deployments), createdByEmail: users.email },
+      project: projects,
+      service: services,
+    })
+    .from(deployments)
+    .innerJoin(serviceInstances, eq(deployments.serviceInstanceId, serviceInstances.id))
+    .innerJoin(services, eq(serviceInstances.serviceId, services.id))
+    .innerJoin(projects, eq(services.projectId, projects.id))
+    .leftJoin(users, eq(deployments.createdById, users.id))
+    .where(and(eq(deployments.id, deploymentId), visible))
+  return row ?? null
 }
 
 export function listMembers(

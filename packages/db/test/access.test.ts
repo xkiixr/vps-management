@@ -5,6 +5,8 @@ import {
   addMember,
   createAppService,
   createProject,
+  enqueueDeployment,
+  findDeploymentFor,
   findProjectFor,
   listMembers,
   listProjectsFor,
@@ -185,4 +187,48 @@ test('two members removing each other at the same time leave one member', async 
   const rejected = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
   expect(rejected!.reason).toBeInstanceOf(ValidationError)
   expect(await memberIds(shop.id)).toHaveLength(1)
+})
+
+// A deployment found from its id alone: for a URL that carries nothing else (the build-log API).
+test('findDeploymentFor gives the deployment with its project, service and creator to a member or an admin', async () => {
+  const alice = await makeUser('alice@example.com')
+  const root = await makeUser('root@example.com', 'admin')
+  const shop = await createProject(db, 'shop', alice.id)
+  const { service, instance } = await addService('shop', 'web')
+  const queued = await enqueueDeployment(db, { serviceInstanceId: instance.id, trigger: 'manual', createdById: alice.id })
+
+  for (const actor of [alice, root]) {
+    const found = await findDeploymentFor(db, actor, queued.id)
+    expect(found?.deployment).toMatchObject({ id: queued.id, status: 'QUEUED', createdByEmail: 'alice@example.com' })
+    expect(found?.project.id).toBe(shop.id)
+    expect(found?.service.id).toBe(service.id)
+  }
+})
+
+test('findDeploymentFor has no creator email for a push, and none once the creator is deleted', async () => {
+  const alice = await makeUser('alice@example.com')
+  const bob = await makeUser('bob@example.com')
+  await createProject(db, 'shop', alice.id)
+  const { instance } = await addService('shop', 'web')
+  const pushed = await enqueueDeployment(db, { serviceInstanceId: instance.id, trigger: 'push' })
+  const manual = await enqueueDeployment(db, { serviceInstanceId: instance.id, trigger: 'manual', createdById: bob.id })
+  expect((await findDeploymentFor(db, alice, pushed.id))?.deployment.createdByEmail).toBeNull()
+  expect((await findDeploymentFor(db, alice, manual.id))?.deployment.createdByEmail).toBe('bob@example.com')
+
+  await db.delete(users).where(eq(users.id, bob.id))
+  expect((await findDeploymentFor(db, alice, manual.id))?.deployment).toMatchObject({ id: manual.id, createdByEmail: null })
+})
+
+test('findDeploymentFor is null for a deployment that does not exist and for one in a project the actor cannot see', async () => {
+  const alice = await makeUser('alice@example.com')
+  const bob = await makeUser('bob@example.com')
+  await createProject(db, 'shop', alice.id)
+  const { instance } = await addService('shop', 'web')
+  const queued = await enqueueDeployment(db, { serviceInstanceId: instance.id, trigger: 'manual' })
+
+  expect(await findDeploymentFor(db, bob, queued.id)).toBeNull()
+  expect(await findDeploymentFor(db, alice, '00000000-0000-4000-8000-000000000000')).toBeNull()
+  expect(await findDeploymentFor(db, alice, 'not-a-uuid')).toBeNull()
+  expect(await findDeploymentFor(db, alice, "' or true --")).toBeNull()
+  expect(await findDeploymentFor(db, { id: 'not-a-uuid', role: 'member' }, queued.id)).toBeNull()
 })
