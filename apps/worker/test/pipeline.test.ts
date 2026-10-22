@@ -137,7 +137,15 @@ describe('happy path', () => {
     const d = await queue()
     await runDeployment(d.id, deps)
     expect(await statusHistory(d.id)).toEqual(['QUEUED', 'BUILDING', 'DEPLOYING', 'SUCCESS'])
-    expect(deps.events).toEqual(['fetch', 'build', 'run vpsm-web-' + d.id.slice(0, 8), 'health', 'routes', 'cleanup'])
+    expect(deps.events).toEqual([
+      'fetch',
+      'build',
+      'run vpsm-web-' + d.id.slice(0, 8),
+      'health',
+      `alias vpsm-web-${d.id.slice(0, 8)} web.internal`,
+      'routes',
+      'cleanup',
+    ])
     expect(await get(d.id)).toMatchObject({
       status: 'SUCCESS',
       containerName: nameOf(d),
@@ -259,7 +267,7 @@ describe('happy path', () => {
     expect(deps.docker.lastSpec().Cmd).toBeUndefined()
   })
 
-  test('the container joins the project network with system env and its private alias; traefik and the worker join too', async () => {
+  test('the container joins the project network with system env, gets its private alias; traefik and the worker join too', async () => {
     const d = await queue()
     await runDeployment(d.id, deps)
     const net = `vpsm-env-${environmentId}`
@@ -280,8 +288,30 @@ describe('happy path', () => {
       ],
       Labels: { 'vpsm.deployment-id': d.id, 'vpsm.service-instance-id': instanceId, 'vpsm.memory-mb': '512' },
       HostConfig: { NetworkMode: net, Memory: 512 * 1024 * 1024, NanoCpus: 1e9 },
-      NetworkingConfig: { EndpointsConfig: { [net]: { Aliases: ['web.internal'] } } },
+      // Created without the alias; it is attached once the container is healthy.
+      NetworkingConfig: { EndpointsConfig: { [net]: { Aliases: [] } } },
     })
+    expect(deps.docker.aliasesOf(nameOf(d), net)).toEqual(['web.internal'])
+  })
+
+  test('the private alias is attached only after the healthcheck passes', async () => {
+    const net = `vpsm-env-${environmentId}`
+    const aliasesDuringHealthcheck: (string[] | undefined)[] = []
+    const realHealth = deps.waitHealthy
+    deps.waitHealthy = async (target, options) => {
+      aliasesDuringHealthcheck.push(deps.docker.aliasesOf(target.host, net))
+      return realHealth(target, options)
+    }
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    // Until then `web.internal` resolves only to the old container (if any), never to an unready one.
+    expect(aliasesDuringHealthcheck).toEqual([[]])
+    expect(deps.docker.aliasesOf(nameOf(d), net)).toEqual(['web.internal'])
+    const e = deps.events
+    expect(e.indexOf('health')).toBeLessThan(e.indexOf(`alias ${nameOf(d)} web.internal`))
+    expect(e.indexOf(`alias ${nameOf(d)} web.internal`)).toBeLessThan(e.indexOf('routes'))
   })
 
   test('the public domain is the alphabetically first one', async () => {
@@ -336,7 +366,18 @@ describe('redeploy', () => {
     expect(e.indexOf('routes')).toBeLessThan(e.indexOf('stop vpsm-web-old00000'))
     expect(e).toContain('sleep 3000')
     expect(e).toContain('sleep 10000')
-    expect(e).toEqual(['fetch', 'build', `run ${nameOf(d2)}`, 'health', 'routes', 'sleep 3000', 'sleep 10000', 'stop vpsm-web-old00000', 'cleanup'])
+    expect(e).toEqual([
+      'fetch',
+      'build',
+      `run ${nameOf(d2)}`,
+      'health',
+      `alias ${nameOf(d2)} web.internal`,
+      'routes',
+      'sleep 3000',
+      'sleep 10000',
+      'stop vpsm-web-old00000',
+      'cleanup',
+    ])
     expect((await get(previous.id)).status).toBe('REMOVED')
     expect(await statusHistory(d2.id)).toEqual(['QUEUED', 'BUILDING', 'DEPLOYING', 'SUCCESS'])
     expect(deps.docker.has('vpsm-web-old00000')).toBe(false)
@@ -377,6 +418,7 @@ describe('failures', () => {
     expect(await get(d2.id)).toMatchObject({ status: 'FAILED', failureReason: 'healthcheck timed out after 300s (last error: ECONNREFUSED)' })
     expect((await get(previous.id)).status).toBe('SUCCESS')
     expect(deps.events).not.toContain('routes')
+    expect(deps.events.some((e) => e.startsWith('alias '))).toBe(false)
     expect(deps.docker.has('vpsm-web-old00000')).toBe(true)
     expect(deps.docker.has(newName)).toBe(false)
     expect(deps.events).toContain(`stop ${newName}`)
@@ -458,15 +500,64 @@ describe('failures', () => {
     expect(deps.docker.has('vpsm-web-old00000')).toBe(true)
   })
 
+  test('a failure to attach the private alias fails the deployment and removes the new container', async () => {
+    const previous = await liveDeployment('vpsm-web-old00000')
+    vi.spyOn(deps.docker, 'attachAlias').mockRejectedValue(new Error('network vpsm-env-x not found'))
+    const d2 = await queue()
+
+    await runDeployment(d2.id, deps)
+
+    expect(await get(d2.id)).toMatchObject({ status: 'FAILED', failureReason: 'internal error: network vpsm-env-x not found' })
+    expect(await statusHistory(d2.id)).toEqual(['QUEUED', 'BUILDING', 'DEPLOYING', 'FAILED'])
+    expect(deps.docker.has(nameOf(d2))).toBe(false)
+    expect(deps.events).toContain(`stop ${nameOf(d2)}`)
+    expect(deps.events).not.toContain('routes')
+    expect((await get(previous.id)).status).toBe('SUCCESS')
+    expect(deps.docker.has('vpsm-web-old00000')).toBe(true)
+  })
+
+  test('writing the routes is retried before the old container is stopped', async () => {
+    await liveDeployment('vpsm-web-old00000')
+    const d2 = await queue()
+    let attempts = 0
+    deps.regenerateRoutes = async () => {
+      attempts++
+      if (attempts < 3) throw new Error(`EBUSY attempt ${attempts}`)
+      deps.events.push('routes')
+    }
+
+    await runDeployment(d2.id, deps)
+
+    expect(attempts).toBe(3)
+    expect(deps.events.slice(deps.events.indexOf(`alias ${nameOf(d2)} web.internal`) + 1)).toEqual([
+      'sleep 1000',
+      'sleep 2000',
+      'routes',
+      'sleep 3000',
+      'sleep 10000',
+      'stop vpsm-web-old00000',
+      'cleanup',
+    ])
+    expect((await get(d2.id)).status).toBe('SUCCESS')
+    const lines = await logLines(d2.id)
+    expect(lines).toContain('==> Updating routes failed, retrying in 1s: EBUSY attempt 1')
+    expect(lines).toContain('==> Updating routes failed, retrying in 2s: EBUSY attempt 2')
+    expect(lines).toContain('==> Live at https://web-shop.apps.example.com')
+  })
+
   test('a failure after going live leaves the deployment live and does not stop the old container', async () => {
     await liveDeployment('vpsm-web-old00000')
     const d2 = await queue()
+    let attempts = 0
     deps.regenerateRoutes = async () => {
+      attempts++
       throw new Error('EACCES: permission denied')
     }
     const error = silenceConsoleError()
     try {
       await runDeployment(d2.id, deps)
+      expect(attempts).toBe(3)
+      expect(deps.events.filter((e) => e.startsWith('sleep '))).toEqual(['sleep 1000', 'sleep 2000'])
       expect(await statusHistory(d2.id)).toEqual(['QUEUED', 'BUILDING', 'DEPLOYING', 'SUCCESS'])
       expect(await get(d2.id)).toMatchObject({ status: 'SUCCESS', failureReason: null })
       expect(deps.docker.has(nameOf(d2))).toBe(true)
@@ -534,7 +625,16 @@ describe('rollback', () => {
     expect(deps.events).not.toContain('fetch')
     expect(deps.docker.lastSpec().Image).toBe('vpsm/si:old')
     expect((await get(rb.id)).status).toBe('SUCCESS')
-    expect(deps.events).toEqual([`run ${nameOf(rb)}`, 'health', 'routes', 'sleep 3000', 'sleep 10000', 'stop vpsm-web-cur00000', 'cleanup'])
+    expect(deps.events).toEqual([
+      `run ${nameOf(rb)}`,
+      'health',
+      `alias ${nameOf(rb)} web.internal`,
+      'routes',
+      'sleep 3000',
+      'sleep 10000',
+      'stop vpsm-web-cur00000',
+      'cleanup',
+    ])
     expect(await statusHistory(rb.id)).toEqual(['QUEUED', 'DEPLOYING', 'SUCCESS'])
     expect((await get(current.id)).status).toBe('REMOVED')
   })

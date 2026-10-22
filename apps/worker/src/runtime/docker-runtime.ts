@@ -26,6 +26,11 @@ export type ContainerState = {
 export interface DockerRuntime {
   ensureNetwork(name: string): Promise<void>
   connect(containerName: string, networkName: string): Promise<void>
+  /**
+   * (Re)attaches a running container to `networkName` with exactly these DNS aliases: disconnects it
+   * from that network if it is on it, then connects it with the aliases. The container keeps running.
+   */
+  attachAlias(containerName: string, networkName: string, aliases: string[]): Promise<void>
   run(spec: Dockerode.ContainerCreateOptions): Promise<void>
   state(name: string): Promise<ContainerState>
   stopAndRemove(name: string, timeoutSec: number): Promise<void>
@@ -86,6 +91,17 @@ export function createDockerRuntime(docker: Dockerode = new Dockerode()): Docker
       } catch (err) {
         if (!/already exists in network/.test(messageOf(err))) throw err
       }
+    },
+
+    async attachAlias(containerName, networkName, aliases) {
+      const network = docker.getNetwork(networkName)
+      try {
+        await network.disconnect({ Container: containerName })
+      } catch (err) {
+        // The daemon answers 500 (older versions 403) with this message; anything else is real.
+        if (!/is not connected to( the)? network/.test(messageOf(err))) throw err
+      }
+      await network.connect({ Container: containerName, EndpointConfig: { Aliases: aliases } })
     },
 
     async run(spec) {

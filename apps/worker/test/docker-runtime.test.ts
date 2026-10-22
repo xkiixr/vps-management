@@ -229,3 +229,50 @@ describe('connect', () => {
     await expect(createDockerRuntime(raced).connect('c', 'net1')).resolves.toBeUndefined()
   })
 })
+
+describe('attachAlias', () => {
+  function networkRecording(disconnectError?: Error, connectError?: Error) {
+    const calls: string[] = []
+    const getNetwork = vi.fn(() => ({
+      disconnect: async (o: object) => {
+        calls.push(`disconnect ${JSON.stringify(o)}`)
+        if (disconnectError) throw disconnectError
+      },
+      connect: async (o: object) => {
+        calls.push(`connect ${JSON.stringify(o)}`)
+        if (connectError) throw connectError
+      },
+    }))
+    return { calls, getNetwork, runtime: createDockerRuntime(fake({ getNetwork })) }
+  }
+
+  test('reconnects the container to the network with the aliases', async () => {
+    const { calls, getNetwork, runtime } = networkRecording()
+    await runtime.attachAlias('vpsm-web-1', 'net1', ['web.internal'])
+    expect(getNetwork).toHaveBeenCalledWith('net1')
+    expect(calls).toEqual([
+      'disconnect {"Container":"vpsm-web-1"}',
+      'connect {"Container":"vpsm-web-1","EndpointConfig":{"Aliases":["web.internal"]}}',
+    ])
+  })
+
+  test('connects a container that was not on the network yet', async () => {
+    // What the daemon answers (HTTP 500) when the container is not attached to that network.
+    const notConnected = dockerError(500, '(HTTP code 500) server error - container abc is not connected to network net1 ')
+    const { calls, runtime } = networkRecording(notConnected)
+    await runtime.attachAlias('vpsm-web-1', 'net1', ['web.internal'])
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toMatch(/^connect /)
+  })
+
+  test('rethrows other disconnect failures without connecting', async () => {
+    const { calls, runtime } = networkRecording(dockerError(404, 'network net1 not found'))
+    await expect(runtime.attachAlias('vpsm-web-1', 'net1', ['web.internal'])).rejects.toThrow('network net1 not found')
+    expect(calls).toEqual(['disconnect {"Container":"vpsm-web-1"}'])
+  })
+
+  test('rethrows a failed connect', async () => {
+    const { runtime } = networkRecording(undefined, dockerError(500, 'daemon error'))
+    await expect(runtime.attachAlias('vpsm-web-1', 'net1', ['web.internal'])).rejects.toThrow('daemon error')
+  })
+})

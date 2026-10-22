@@ -15,8 +15,11 @@ const names = {
   dies: `${run}-dies`,
   base: `${run}-base`,
   fromCommit: `${run}-from-commit`,
+  aliased: `${run}-aliased`,
   net1: `${run}-net1`,
   net2: `${run}-net2`,
+  net3: `${run}-net3`,
+  net4: `${run}-net4`,
 }
 const committedImage = { repo: `vpsm-int/${run}`, tag: '1' }
 const committedRef = `${committedImage.repo}:${committedImage.tag}`
@@ -28,7 +31,13 @@ const docker = new Dockerode()
 const runtime = createDockerRuntime(docker)
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-const specFor = (name: string, networkName: string, cmd: string[], deploy: DeployConfig = DEFAULT_DEPLOY_CONFIG) =>
+const specFor = (
+  name: string,
+  networkName: string,
+  cmd: string[],
+  deploy: DeployConfig = DEFAULT_DEPLOY_CONFIG,
+  aliases: string[] = ['web.internal'],
+) =>
   buildContainerSpec({
     name,
     image: IMAGE,
@@ -36,10 +45,31 @@ const specFor = (name: string, networkName: string, cmd: string[], deploy: Deplo
     deploy,
     cmd,
     networkName,
-    aliases: ['web.internal'],
+    aliases,
     deploymentId: 'd-int',
     serviceInstanceId: 'si-int',
   })
+
+let probes = 0
+
+/** Looks `host` up from a throwaway container on `networkName`, through Docker's embedded DNS. */
+async function resolveFrom(networkName: string, host: string): Promise<{ exitCode: number; output: string }> {
+  const probe = await docker.createContainer({
+    name: `${run}-probe-${probes++}`,
+    Image: IMAGE,
+    Cmd: ['getent', 'hosts', host],
+    Tty: true,
+    HostConfig: { NetworkMode: networkName },
+  })
+  try {
+    await probe.start()
+    const { StatusCode } = await probe.wait()
+    const output = (await probe.logs({ stdout: true, stderr: true })).toString()
+    return { exitCode: StatusCode, output }
+  } finally {
+    await probe.remove({ force: true })
+  }
+}
 
 async function waitFor<T>(what: string, poll: () => Promise<T | undefined> | T | undefined, timeoutMs = 15_000): Promise<T> {
   const deadline = Date.now() + timeoutMs
@@ -135,6 +165,32 @@ test('ensureNetwork and connect are idempotent', async () => {
   expect(Object.keys(NetworkSettings.Networks).sort()).toEqual([names.net1, names.net2])
   await runtime.stopAndRemove(names.main, 5)
 })
+
+test('attachAlias makes a running container resolvable by its alias from the network', async () => {
+  const alias = 'web.internal'
+  await runtime.ensureNetwork(names.net3)
+  await runtime.run(specFor(names.aliased, names.net3, LONG_RUNNING, DEFAULT_DEPLOY_CONFIG, []))
+  expect((await resolveFrom(names.net3, alias)).exitCode).not.toBe(0)
+
+  await runtime.attachAlias(names.aliased, names.net3, [alias])
+
+  const info = await docker.getContainer(names.aliased).inspect()
+  expect(info.State.Running).toBe(true)
+  const endpoint = info.NetworkSettings.Networks[names.net3]!
+  expect(endpoint.Aliases).toContain(alias)
+  const resolved = await resolveFrom(names.net3, alias)
+  expect(resolved.exitCode).toBe(0)
+  expect(resolved.output).toContain(endpoint.IPAddress)
+
+  // A network the container is not on yet is simply joined with the alias.
+  await runtime.ensureNetwork(names.net4)
+  await runtime.attachAlias(names.aliased, names.net4, [alias])
+  expect((await resolveFrom(names.net4, alias)).exitCode).toBe(0)
+  const { NetworkSettings } = await docker.getContainer(names.aliased).inspect()
+  expect(Object.keys(NetworkSettings.Networks).sort()).toEqual([names.net3, names.net4])
+
+  await runtime.stopAndRemove(names.aliased, 5)
+}, 60_000)
 
 test('onContainerDie reports managed containers only, and stops after unsubscribe', async () => {
   await runtime.ensureNetwork(names.net1)

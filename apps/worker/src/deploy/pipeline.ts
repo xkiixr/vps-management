@@ -266,7 +266,8 @@ async function runPhase(job: Job, image: Image): Promise<string> {
     // A railpack image already has the start command baked in.
     cmd: builder === 'dockerfile' && deploy.startCommand ? ['sh', '-c', deploy.startCommand] : undefined,
     networkName: net,
-    aliases: [privateHostname(ctx.service.name)],
+    // No alias yet: until it is healthy, `<service>.internal` must keep resolving only to the live container.
+    aliases: [],
     deploymentId: ctx.deployment.id,
     serviceInstanceId: ctx.instance.id,
   })
@@ -281,7 +282,24 @@ async function runPhase(job: Job, image: Image): Promise<string> {
     { timeoutMs: deploy.healthcheckTimeoutSec * 1000, state: () => docker.state(name) },
   )
   if (!health.ok) throw new DeploymentFailure(health.reason)
+  await docker.attachAlias(name, net, [privateHostname(ctx.service.name)])
   return name
+}
+
+/** Waits between attempts to write the routes: 3 attempts in all. */
+const ROUTES_RETRY_DELAYS_MS = [1000, 2000]
+
+async function regenerateRoutesWithRetry(job: Job): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await job.deps.regenerateRoutes()
+    } catch (error) {
+      const delay = ROUTES_RETRY_DELAYS_MS[attempt]
+      if (delay === undefined) throw error
+      job.log('deploy', `==> Updating routes failed, retrying in ${delay / 1000}s: ${messageOf(error)}`)
+      await job.deps.sleep(delay)
+    }
+  }
 }
 
 const publicHostnameOf = (ctx: DeploymentContext) => ctx.domains.map((d) => d.hostname).sort()[0]
@@ -292,7 +310,7 @@ async function switchPhase(job: Job, name: string): Promise<void> {
   const { previous } = ctx
   await markDeploymentLive(deps.db, { deploymentId: ctx.deployment.id, containerName: name, previousId: previous?.id })
   job.status = 'SUCCESS'
-  await deps.regenerateRoutes()
+  await regenerateRoutesWithRetry(job)
   const publicHostname = publicHostnameOf(ctx)
   job.log('deploy', publicHostname ? `==> Live at https://${publicHostname}` : '==> Live (no public domain)')
 

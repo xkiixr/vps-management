@@ -30,13 +30,18 @@ const MISSING: ContainerState = {
   maxRetries: 0,
 }
 
-/** An in-memory Docker. `run` and `stopAndRemove` are recorded in `events` as `run <name>` / `stop <name>`. */
+/**
+ * An in-memory Docker. `run`, `attachAlias` and `stopAndRemove` are recorded in `events` as
+ * `run <name>`, `alias <name> <aliases joined by ,>` and `stop <name>`.
+ */
 export class FakeDocker implements DockerRuntime {
   readonly existingImages = new Set<string>()
   readonly networks = new Set<string>()
   /** `[container, network]` for every `connect` call. */
   readonly connections: [string, string][] = []
   private readonly containers = new Map<string, FakeContainer>()
+  /** Per container: the networks it is on, each with its aliases there. */
+  private readonly endpoints = new Map<string, Map<string, string[]>>()
   private readonly specs: Dockerode.ContainerCreateOptions[] = []
   private readonly dieListeners = new Set<(name: string) => void>()
   private seeded = 0
@@ -45,6 +50,17 @@ export class FakeDocker implements DockerRuntime {
 
   has(name: string): boolean {
     return this.containers.has(name)
+  }
+
+  /** The container's aliases on `network`, or undefined when it is not on that network. */
+  aliasesOf(name: string, network: string): string[] | undefined {
+    return this.endpoints.get(name)?.get(network)
+  }
+
+  private joinNetwork(name: string, network: string, aliases: string[]): void {
+    const networks = this.endpoints.get(name) ?? new Map<string, string[]>()
+    networks.set(network, [...aliases])
+    this.endpoints.set(name, networks)
   }
 
   lastSpec(): Dockerode.ContainerCreateOptions {
@@ -84,6 +100,14 @@ export class FakeDocker implements DockerRuntime {
   async connect(containerName: string, networkName: string): Promise<void> {
     if (!this.networks.has(networkName)) throw new Error(`no network ${networkName}`)
     this.connections.push([containerName, networkName])
+    this.joinNetwork(containerName, networkName, this.aliasesOf(containerName, networkName) ?? [])
+  }
+
+  async attachAlias(containerName: string, networkName: string, aliases: string[]): Promise<void> {
+    if (!this.networks.has(networkName)) throw new Error(`no network ${networkName}`)
+    if (!this.containers.has(containerName)) throw new Error(`no container ${containerName}`)
+    this.events.push(`alias ${containerName} ${aliases.join(',')}`)
+    this.joinNetwork(containerName, networkName, aliases)
   }
 
   async run(spec: Dockerode.ContainerCreateOptions): Promise<void> {
@@ -102,6 +126,9 @@ export class FakeDocker implements DockerRuntime {
       spec,
       state: runningState(),
     })
+    for (const [network, endpoint] of Object.entries(spec.NetworkingConfig?.EndpointsConfig ?? {})) {
+      this.joinNetwork(name, network, endpoint.Aliases ?? [])
+    }
   }
 
   async state(name: string): Promise<ContainerState> {
@@ -111,6 +138,7 @@ export class FakeDocker implements DockerRuntime {
   async stopAndRemove(name: string, _timeoutSec: number): Promise<void> {
     this.events.push(`stop ${name}`)
     this.containers.delete(name)
+    this.endpoints.delete(name)
   }
 
   async restart(name: string): Promise<void> {
