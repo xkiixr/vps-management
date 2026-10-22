@@ -29,12 +29,20 @@ export function validateRoute(route: Route): void {
   }
 }
 
-export function renderRoutesYaml(routes: Route[]): string {
+export type RoutesTls = 'resolver' | 'default'
+
+/**
+ * `tls: 'resolver'` (default) has each router request its own certificate from the `le` resolver.
+ * `tls: 'default'` only switches TLS on and uses the default certificate store, where Traefik keeps the
+ * certificate its entrypoint requested (the wildcard of the dns-wildcard mode).
+ */
+export function renderRoutesYaml(routes: Route[], options: { tls?: RoutesTls } = {}): string {
   // Traefik rejects a file whose routers and services are all empty ("routers cannot be a standalone
   // element") and then keeps serving the previous routes, so "no routes" is a comment-only file.
   if (routes.length === 0) return '# no routes\n'
   const routers: Record<string, unknown> = {}
   const services: Record<string, unknown> = {}
+  const tlsOf = () => (options.tls === 'default' ? {} : { certResolver: CERT_RESOLVER })
   for (const route of routes) {
     validateRoute(route)
     const rule = [...route.hostnames]
@@ -45,7 +53,8 @@ export function renderRoutesYaml(routes: Route[]): string {
       rule,
       entryPoints: [ENTRY_POINT],
       service: `s-${route.serviceInstanceId}`,
-      tls: { certResolver: CERT_RESOLVER },
+      // A new object per router: the same one twice would be written as a YAML anchor and alias.
+      tls: tlsOf(),
     }
     services[`s-${route.serviceInstanceId}`] = { loadBalancer: { servers: [{ url: route.upstreamUrl }] } }
   }

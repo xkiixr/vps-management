@@ -107,6 +107,14 @@ describe('service:create', () => {
     expect(out).toEqual(['https://web-shop.apps.example.com', `queued deployment ${queued!.id}`])
   })
 
+  test('prints the URL with the public HTTPS port when it is not 443', async () => {
+    deps.config = { ...deps.config, publicHttpsPort: 8443 }
+    await createProject(db, 'shop')
+    await cli('service:create', 'shop', 'web', '--repo', 'acme/web', '--branch', 'main')
+    const [queued] = await deploymentsOf('shop', 'web')
+    expect(out).toEqual(['https://web-shop.apps.example.com:8443', `queued deployment ${queued!.id}`])
+  })
+
   test('maps the flags onto the source and deploy configuration', async () => {
     await cli('project:create', 'shop')
     const code = await cli(
@@ -333,6 +341,13 @@ describe('status', () => {
       'api  QUEUED  https://api-shop.apps.example.com',
       'web  SUCCESS  https://web-shop.apps.example.com',
     ])
+  })
+
+  test('shows URLs with the public HTTPS port when it is not 443', async () => {
+    deps.config = { ...deps.config, publicHttpsPort: 8443 }
+    await addProjectWithService()
+    await cli('status', 'shop')
+    expect(out).toEqual(['web  -  https://web-shop.apps.example.com:8443'])
   })
 
   test('shows the newest deployment by creation time, not the one that is live', async () => {

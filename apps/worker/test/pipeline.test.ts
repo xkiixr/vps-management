@@ -337,6 +337,13 @@ describe('happy path', () => {
     expect(await logLines(d.id)).toContain('==> Live at https://aaa.example.org')
   })
 
+  test('the live log line carries the public HTTPS port when it is not 443', async () => {
+    deps.config = { ...deps.config, publicHttpsPort: 8443 }
+    const d = await queue()
+    await runDeployment(d.id, deps)
+    expect(await logLines(d.id)).toContain('==> Live at https://web-shop.apps.example.com:8443')
+  })
+
   test('healthcheck probes the new container by name with the deploy settings', async () => {
     await setDeploy({ port: 3000, healthcheckTimeoutSec: 60 })
     const health = vi.fn(deps.waitHealthy)

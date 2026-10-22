@@ -28,6 +28,61 @@ test('renders router and service per instance', () => {
   )
 })
 
+test("the 'resolver' option renders what the default renders", () => {
+  const routes = [{ serviceInstanceId: 'si1', hostnames: ['web-shop.apps.example.com'], upstreamUrl: 'http://vpsm-web-12345678:8080' }]
+  expect(renderRoutesYaml(routes, { tls: 'resolver' })).toBe(renderRoutesYaml(routes))
+  expect(renderRoutesYaml(routes, {})).toBe(renderRoutesYaml(routes))
+})
+
+// The wildcard certificate is requested once on the entrypoint; routers only have to enable TLS.
+test("the 'default' option renders routers that use the default certificate store", () => {
+  expect(
+    renderRoutesYaml(
+      [
+        { serviceInstanceId: 'si1', hostnames: ['web-shop.apps.example.com'], upstreamUrl: 'http://vpsm-web-12345678:8080' },
+        { serviceInstanceId: 'si2', hostnames: ['b.example.com', 'a.example.com'], upstreamUrl: 'http://vpsm-api-87654321:3000' },
+      ],
+      { tls: 'default' },
+    ),
+  ).toBe(
+    `http:
+  routers:
+    r-si1:
+      rule: Host(\`web-shop.apps.example.com\`)
+      entryPoints:
+        - websecure
+      service: s-si1
+      tls: {}
+    r-si2:
+      rule: Host(\`a.example.com\`) || Host(\`b.example.com\`)
+      entryPoints:
+        - websecure
+      service: s-si2
+      tls: {}
+  services:
+    s-si1:
+      loadBalancer:
+        servers:
+          - url: http://vpsm-web-12345678:8080
+    s-si2:
+      loadBalancer:
+        servers:
+          - url: http://vpsm-api-87654321:3000
+`,
+  )
+})
+
+test("no routes is a comment-only file in either tls mode", () => {
+  expect(renderRoutesYaml([], { tls: 'default' })).toBe('# no routes\n')
+  expect(renderRoutesYaml([], { tls: 'resolver' })).toBe('# no routes\n')
+})
+
+test("'default' still validates every route", () => {
+  expect(() =>
+    renderRoutesYaml([{ serviceInstanceId: 'si1', hostnames: ['A.example.com'], upstreamUrl: 'http://x:1' }], { tls: 'default' }),
+  ).toThrow('invalid hostname: A.example.com')
+})
+
 test('renders one router and service per route, in the given order', () => {
   const yaml = renderRoutesYaml([
     { serviceInstanceId: 'si1', hostnames: ['a.example.com'], upstreamUrl: 'http://one:1' },

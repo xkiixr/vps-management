@@ -14,6 +14,10 @@ export type WorkerConfig = {
   drainSeconds: number
   imageRetention: number
   workDir: string
+  /** `http01`: a certificate per host (Let's Encrypt HTTP-01 on port 80). `dns-wildcard`: one `*.APPS_DOMAIN` certificate (DNS-01). */
+  tlsMode: 'http01' | 'dns-wildcard'
+  /** The host port that reaches Traefik's HTTPS entrypoint; it only ends up in the URLs the worker prints. */
+  publicHttpsPort: number
   githubToken?: string
 }
 
@@ -49,6 +53,8 @@ const fields = z.object({
     (p) => !path.isAbsolute(p) || depth(p) >= 2,
     'must be a dedicated directory at least two levels below / (such as /var/lib/vpsm/work)',
   ),
+  TLS_MODE: z.enum(['http01', 'dns-wildcard']).default('http01'),
+  PUBLIC_HTTPS_PORT: z.coerce.number().int().min(1).max(65535).default(443),
   GITHUB_TOKEN: z.string().optional(),
 })
 
@@ -81,6 +87,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     drainSeconds: e.DRAIN_SECONDS,
     imageRetention: e.IMAGE_RETENTION,
     workDir: e.WORK_DIR,
+    tlsMode: e.TLS_MODE,
+    publicHttpsPort: e.PUBLIC_HTTPS_PORT,
     ...(e.GITHUB_TOKEN === undefined ? {} : { githubToken: e.GITHUB_TOKEN }),
   }
 }

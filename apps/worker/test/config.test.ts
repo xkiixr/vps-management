@@ -26,6 +26,8 @@ test('every default', () => {
     drainSeconds: 10,
     imageRetention: 5,
     workDir: '/var/lib/vpsm/work',
+    tlsMode: 'http01',
+    publicHttpsPort: 443,
   })
 })
 
@@ -43,6 +45,8 @@ test('reads every variable from the environment', () => {
       DRAIN_SECONDS: '0',
       IMAGE_RETENTION: '3',
       WORK_DIR: '/data/work',
+      TLS_MODE: 'dns-wildcard',
+      PUBLIC_HTTPS_PORT: '8443',
       GITHUB_TOKEN: 'ghs_abc',
     }),
   ).toEqual({
@@ -57,6 +61,8 @@ test('reads every variable from the environment', () => {
     drainSeconds: 0,
     imageRetention: 3,
     workDir: '/data/work',
+    tlsMode: 'dns-wildcard',
+    publicHttpsPort: 8443,
     githubToken: 'ghs_abc',
   })
 })
@@ -83,8 +89,23 @@ test.each([
   ['IMAGE_RETENTION', '0'],
   ['WORK_DIR', 'relative/work'],
   ['TRAEFIK_DYNAMIC_DIR', 'traefik'],
+  ['TLS_MODE', 'dns'],
+  ['TLS_MODE', 'DNS-WILDCARD'],
+  ['PUBLIC_HTTPS_PORT', '0'],
+  ['PUBLIC_HTTPS_PORT', '65536'],
+  ['PUBLIC_HTTPS_PORT', '84.43'],
+  ['PUBLIC_HTTPS_PORT', 'https'],
 ])('%s=%s is rejected', (name, value) => {
   expect(() => loadConfig({ APPS_DOMAIN: 'apps.example.com', [name]: value })).toThrow(new RegExp(name))
+})
+
+test('TLS_MODE accepts both modes and PUBLIC_HTTPS_PORT the whole port range', () => {
+  const load = (env: Record<string, string>) => loadConfig({ APPS_DOMAIN: 'apps.example.com', ...env })
+  expect(load({ TLS_MODE: 'http01' }).tlsMode).toBe('http01')
+  expect(load({ TLS_MODE: 'dns-wildcard' }).tlsMode).toBe('dns-wildcard')
+  expect(load({ PUBLIC_HTTPS_PORT: '1' }).publicHttpsPort).toBe(1)
+  expect(load({ PUBLIC_HTTPS_PORT: '65535' }).publicHttpsPort).toBe(65535)
+  expect(load({ TLS_MODE: '', PUBLIC_HTTPS_PORT: '' })).toMatchObject({ tlsMode: 'http01', publicHttpsPort: 443 })
 })
 
 test('the error never contains the token', () => {

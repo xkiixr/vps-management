@@ -22,6 +22,11 @@ export function generatedHostname(serviceName: string, projectName: string, apps
   return `${serviceName}-${projectName}.${appsDomain}`
 }
 
+/** The address an app is reached at: the port is left out when it is the HTTPS default (443). */
+export function publicUrl(hostname: string, httpsPort: number): string {
+  return httpsPort === 443 ? `https://${hostname}` : `https://${hostname}:${httpsPort}`
+}
+
 export function privateHostname(serviceName: string): string {
   return `${serviceName}.internal`
 }

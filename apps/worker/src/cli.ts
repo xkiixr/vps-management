@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { and, asc, desc, eq, isNotNull } from 'drizzle-orm'
-import type { DeploymentTrigger } from '@vpsm/core'
+import { type DeploymentTrigger, publicUrl } from '@vpsm/core'
 import {
   createAppService,
   createDb,
@@ -103,7 +103,7 @@ const COMMANDS: Record<string, Command> = {
         deploy: { healthcheckPath: healthcheck, port, memoryLimitMB: memory, startCommand: start },
         appsDomain: c.config.appsDomain,
       })
-      c.out(`https://${domain.hostname}`)
+      c.out(publicUrl(domain.hostname, c.config.publicHttpsPort))
       await enqueue(c, instance.id, 'manual')
     },
   },
@@ -157,7 +157,7 @@ const COMMANDS: Record<string, Command> = {
 
   status: {
     args: ['project'],
-    async run({ db, out, args: [project] }) {
+    async run({ db, config, out, args: [project] }) {
       const [found] = await db.select({ id: projects.id }).from(projects).where(eq(projects.name, project!))
       if (!found) throw new CliError(`project ${project} not found`)
 
@@ -177,7 +177,7 @@ const COMMANDS: Record<string, Command> = {
               .limit(1)
           : []
         const domain = details?.domains.find((d) => d.kind === 'generated')
-        out(`${name}  ${latest?.status ?? '-'}  ${domain ? `https://${domain.hostname}` : '-'}`)
+        out(`${name}  ${latest?.status ?? '-'}  ${domain ? publicUrl(domain.hostname, config.publicHttpsPort) : '-'}`)
       }
     },
   },

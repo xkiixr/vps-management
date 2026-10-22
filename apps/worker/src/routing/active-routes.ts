@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm'
 import { deployments, domains, type Db } from '@vpsm/db'
-import { type Route, renderRoutesYaml, validateRoute, writeRoutesFile } from './traefik-config'
+import { type Route, type RoutesTls, renderRoutesYaml, validateRoute, writeRoutesFile } from './traefik-config'
 
 function deployPort(configSnapshot: unknown): number | undefined {
   const deploy = (configSnapshot as { deploy?: { port?: unknown } } | null)?.deploy
@@ -68,6 +68,6 @@ export async function loadActiveRoutes(db: Db, onInvalid: OnInvalidRoute = warnI
   return routes
 }
 
-export async function regenerateRoutes(db: Db, dir: string, onInvalid?: OnInvalidRoute): Promise<void> {
-  await writeRoutesFile(dir, renderRoutesYaml(await loadActiveRoutes(db, onInvalid)))
+export async function regenerateRoutes(db: Db, dir: string, onInvalid?: OnInvalidRoute, tls?: RoutesTls): Promise<void> {
+  await writeRoutesFile(dir, renderRoutesYaml(await loadActiveRoutes(db, onInvalid), { tls }))
 }

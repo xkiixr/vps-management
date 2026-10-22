@@ -9,6 +9,7 @@ import {
   imageTag,
   networkName,
   privateHostname,
+  publicUrl,
   type SourceConfig,
   systemEnv,
 } from '@vpsm/core'
@@ -331,7 +332,7 @@ async function switchPhase(job: Job, name: string): Promise<void> {
   job.status = 'SUCCESS'
   await regenerateRoutesWithRetry(job)
   const publicHostname = publicHostnameOf(ctx)
-  job.log('deploy', publicHostname ? `==> Live at https://${publicHostname}` : '==> Live (no public domain)')
+  job.log('deploy', publicHostname ? `==> Live at ${publicUrl(publicHostname, deps.config.publicHttpsPort)}` : '==> Live (no public domain)')
 
   if (previous) {
     await deps.sleep(ROUTES_RELOAD_MS)

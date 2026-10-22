@@ -192,6 +192,26 @@ test('regenerateRoutes writes the routes of live deployments to routes.yml', asy
   }
 })
 
+test("regenerateRoutes passes the tls option on: 'default' renders routers without a certificate resolver", async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'vpsm-regen-'))
+  try {
+    const si1 = await addService('web')
+    await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
+
+    await regenerateRoutes(db, dir, undefined, 'default')
+
+    const yaml = await readFile(join(dir, 'routes.yml'), 'utf8')
+    expect(yaml).toContain(`    r-${si1}:\n      rule: Host(\`web-shop.apps.example.com\`)\n`)
+    expect(yaml).toContain('      tls: {}\n')
+    expect(yaml).not.toContain('certResolver')
+
+    await regenerateRoutes(db, dir, undefined, 'resolver')
+    expect(await readFile(join(dir, 'routes.yml'), 'utf8')).toContain('        certResolver: le\n')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('regenerateRoutes still writes the good routes when a sibling is invalid', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vpsm-regen-'))
   try {
