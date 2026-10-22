@@ -2,27 +2,20 @@
 
 import { useActionState } from 'react'
 import { Button } from '@/components/ui/button'
-import { type ActionState, rollbackAction } from '@/server/actions/deployments'
+import type { ActionState, FormAction } from '@/server/action-state'
 
 const initialState: ActionState = {}
 
 /** The Rollback button of one row of the deployments table: deploys that deployment's image again. */
 export function RollbackButton({
-  projectName,
-  serviceName,
-  deploymentId,
   label,
+  action,
 }: {
-  projectName: string
-  serviceName: string
-  deploymentId: string
   /** What the deployment is called, for screen readers: there is one of these buttons in every row. */
   label: string
+  action: FormAction<ActionState>
 }) {
-  const [state, formAction, pending] = useActionState(
-    rollbackAction.bind(null, projectName, serviceName, deploymentId),
-    initialState,
-  )
+  const [state, formAction, pending] = useActionState(action, initialState)
   return (
     <form action={formAction} className="flex flex-col items-end gap-1">
       <Button type="submit" variant="outline" size="sm" disabled={pending} aria-label={`Roll back to deployment ${label}`}>

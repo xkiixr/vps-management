@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDateTime } from '@/lib/format'
+import { deleteProjectAction } from '@/server/actions/projects'
+import { createServiceAction } from '@/server/actions/services'
 import { webConfig } from '@/server/config'
 import { getDb } from '@/server/db'
 import { requireUser } from '@/server/guards'
@@ -105,7 +107,7 @@ export default async function ProjectPage({ params }: Props) {
           <CardDescription>Builds the repository and deploys it as soon as the service is created.</CardDescription>
         </CardHeader>
         <CardContent>
-          <NewServiceForm projectName={project.name} maxMemoryMb={maxMemoryMb} />
+          <NewServiceForm maxMemoryMb={maxMemoryMb} action={createServiceAction.bind(null, project.name)} />
         </CardContent>
       </Card>
 
@@ -118,7 +120,7 @@ export default async function ProjectPage({ params }: Props) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <DeleteProjectForm projectName={project.name} />
+          <DeleteProjectForm projectName={project.name} action={deleteProjectAction.bind(null, project.name)} />
         </CardContent>
       </Card>
     </div>

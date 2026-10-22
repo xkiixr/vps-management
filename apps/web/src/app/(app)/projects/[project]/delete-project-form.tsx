@@ -5,12 +5,12 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { type ActionState, deleteProjectAction } from '@/server/actions/projects'
+import type { ActionState, FormAction } from '@/server/action-state'
 
 const initialState: ActionState = {}
 
-export function DeleteProjectForm({ projectName }: { projectName: string }) {
-  const [state, formAction, pending] = useActionState(deleteProjectAction.bind(null, projectName), initialState)
+export function DeleteProjectForm({ projectName, action }: { projectName: string; action: FormAction<ActionState> }) {
+  const [state, formAction, pending] = useActionState(action, initialState)
   return (
     <form action={formAction} className="grid gap-4">
       {state.error && (

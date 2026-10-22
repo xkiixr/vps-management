@@ -4,7 +4,7 @@ import { useActionState } from 'react'
 import { TextField } from '@/components/text-field'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { type ActionState, saveServiceSettingsAction } from '@/server/actions/services'
+import type { ActionState, FormAction } from '@/server/action-state'
 
 const initialState: ActionState = {}
 
@@ -20,17 +20,15 @@ export type ServiceSettings = {
 }
 
 export function SettingsForm({
-  projectName,
-  serviceName,
   current,
   maxMemoryMb,
+  action,
 }: {
-  projectName: string
-  serviceName: string
   current: ServiceSettings
   maxMemoryMb: number
+  action: FormAction<ActionState>
 }) {
-  const [state, formAction, pending] = useActionState(saveServiceSettingsAction.bind(null, projectName, serviceName), initialState)
+  const [state, formAction, pending] = useActionState(action, initialState)
   const errors = state.fieldErrors ?? {}
   // React empties the form once its action is done; what was typed comes back from the action when it was
   // refused, and otherwise the saved settings (which the page has reloaded by then) are shown.

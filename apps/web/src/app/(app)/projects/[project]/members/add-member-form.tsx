@@ -5,12 +5,12 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { type ActionState, addMemberAction } from '@/server/actions/projects'
+import type { ActionState, FormAction } from '@/server/action-state'
 
 const initialState: ActionState = {}
 
-export function AddMemberForm({ projectName }: { projectName: string }) {
-  const [state, formAction, pending] = useActionState(addMemberAction.bind(null, projectName), initialState)
+export function AddMemberForm({ action }: { action: FormAction<ActionState> }) {
+  const [state, formAction, pending] = useActionState(action, initialState)
   const emailError = state.fieldErrors?.email
   return (
     <form action={formAction} className="grid gap-4">

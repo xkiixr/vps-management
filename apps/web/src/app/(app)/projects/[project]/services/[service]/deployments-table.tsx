@@ -3,6 +3,7 @@ import type { Deployment } from '@vpsm/db'
 import { StatusBadge } from '@/components/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { firstLine, formatDateTime, shortSha, triggerLabel } from '@/lib/format'
+import { rollbackAction } from '@/server/actions/deployments'
 import { RollbackButton } from './rollback-button'
 
 export type DeploymentRow = Deployment & { createdByEmail: string | null }
@@ -86,10 +87,8 @@ export function DeploymentsTable({
                   </Link>
                   {deployment.imageTag && !isLive && (
                     <RollbackButton
-                      projectName={projectName}
-                      serviceName={serviceName}
-                      deploymentId={deployment.id}
                       label={deployment.id.slice(0, 8)}
+                      action={rollbackAction.bind(null, projectName, serviceName, deployment.id)}
                     />
                   )}
                 </div>

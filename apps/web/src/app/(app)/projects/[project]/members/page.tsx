@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation'
 import { findProjectFor, listMembers } from '@vpsm/db'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { addMemberAction, removeMemberAction } from '@/server/actions/projects'
 import { getDb } from '@/server/db'
 import { requireUser } from '@/server/guards'
 import { AddMemberForm } from './add-member-form'
@@ -65,7 +66,7 @@ export default async function MembersPage({ params }: Props) {
                     <TableCell>{member.email}</TableCell>
                     <TableCell className="text-muted-foreground">{addedAt.toISOString().slice(0, 10)}</TableCell>
                     <TableCell>
-                      <RemoveMemberForm projectName={project.name} userId={member.id} label={member.email} />
+                      <RemoveMemberForm label={member.email} action={removeMemberAction.bind(null, project.name, member.id)} />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -81,7 +82,7 @@ export default async function MembersPage({ params }: Props) {
           <CardDescription>The person needs an account already; an administrator creates accounts.</CardDescription>
         </CardHeader>
         <CardContent>
-          <AddMemberForm projectName={project.name} />
+          <AddMemberForm action={addMemberAction.bind(null, project.name)} />
         </CardContent>
       </Card>
     </div>

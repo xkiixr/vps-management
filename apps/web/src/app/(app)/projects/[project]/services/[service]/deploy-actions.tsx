@@ -2,7 +2,7 @@
 
 import { useActionState, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { type ActionState, deployAction, restartAction } from '@/server/actions/deployments'
+import type { ActionState, FormAction } from '@/server/action-state'
 
 const initialState: ActionState = {}
 
@@ -10,16 +10,16 @@ type Which = 'deploy' | 'restart'
 
 /** The Deploy and Restart buttons above the deployments, with what became of the last one pressed next to them. */
 export function DeployActions({
-  projectName,
-  serviceName,
   canRestart,
+  deploy,
+  restart,
 }: {
-  projectName: string
-  serviceName: string
   canRestart: boolean
+  deploy: FormAction<ActionState>
+  restart: FormAction<ActionState>
 }) {
-  const [deployState, deployForm, deploying] = useActionState(deployAction.bind(null, projectName, serviceName), initialState)
-  const [restartState, restartForm, restarting] = useActionState(restartAction.bind(null, projectName, serviceName), initialState)
+  const [deployState, deployForm, deploying] = useActionState(deploy, initialState)
+  const [restartState, restartForm, restarting] = useActionState(restart, initialState)
   // Only the answer to the button pressed last is shown: an old refusal of one must not sit next to the other.
   const [last, setLast] = useState<Which | null>(null)
   const shown = last === 'deploy' ? deployState : last === 'restart' ? restartState : initialState

@@ -2,12 +2,12 @@
 
 import { useActionState } from 'react'
 import { Button } from '@/components/ui/button'
-import { type ActionState, removeMemberAction } from '@/server/actions/projects'
+import type { ActionState, FormAction } from '@/server/action-state'
 
 const initialState: ActionState = {}
 
-export function RemoveMemberForm({ projectName, userId, label }: { projectName: string; userId: string; label: string }) {
-  const [state, formAction, pending] = useActionState(removeMemberAction.bind(null, projectName, userId), initialState)
+export function RemoveMemberForm({ label, action }: { label: string; action: FormAction<ActionState> }) {
+  const [state, formAction, pending] = useActionState(action, initialState)
   return (
     <form action={formAction} className="flex items-center justify-end gap-3">
       {state.error && (

@@ -3,6 +3,7 @@ import { listUsers } from '@vpsm/db'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { resetPasswordAction, setDisabledAction, setRoleAction } from '@/server/actions/admin'
 import { getDb } from '@/server/db'
 import { requireAdmin } from '@/server/guards'
 import { CreateUserForm } from './create-user-form'
@@ -63,11 +64,13 @@ export default async function UsersPage() {
                   <TableCell className="text-muted-foreground">{day(user.createdAt)}</TableCell>
                   <TableCell>
                     <UserActions
-                      userId={user.id}
                       email={user.email}
                       role={user.role}
                       disabled={user.disabledAt !== null}
                       isSelf={user.id === admin.id}
+                      setRole={setRoleAction.bind(null, user.id, user.role === 'admin' ? 'member' : 'admin')}
+                      setDisabled={setDisabledAction.bind(null, user.id, user.disabledAt === null)}
+                      resetPassword={resetPasswordAction.bind(null, user.id)}
                     />
                   </TableCell>
                 </TableRow>

@@ -3,13 +3,7 @@
 import Link from 'next/link'
 import { useActionState } from 'react'
 import { Button } from '@/components/ui/button'
-import {
-  type ActionState,
-  type PasswordState,
-  resetPasswordAction,
-  setDisabledAction,
-  setRoleAction,
-} from '@/server/actions/admin'
+import type { ActionState, FormAction, PasswordState } from '@/server/action-state'
 import { IssuedPasswordNotice } from './issued-password'
 
 const initialState: ActionState = {}
@@ -18,25 +12,32 @@ const initialPasswordState: PasswordState = {}
 /**
  * What an admin can do to one user: change the role, disable or enable, and reset the password. The password is
  * shown under the buttons, once. An admin's own row has no reset: it would end their own session with a password
- * they could not see, so they change it on the Account page instead. Plain strings only come in.
+ * they could not see, so they change it on the Account page instead. Plain strings and the actions, already bound
+ * to this user by the page, come in.
  */
 export function UserActions({
-  userId,
   email,
   role,
   disabled,
   isSelf,
+  setRole,
+  setDisabled,
+  resetPassword,
 }: {
-  userId: string
   email: string
   role: 'admin' | 'member'
   disabled: boolean
   isSelf: boolean
+  /** Gives the user the other role than `role`. */
+  setRole: FormAction<ActionState>
+  /** Disables the user, or enables them when `disabled`. */
+  setDisabled: FormAction<ActionState>
+  resetPassword: FormAction<PasswordState>
 }) {
   const nextRole = role === 'admin' ? 'member' : 'admin'
-  const [roleState, roleForm, changingRole] = useActionState(setRoleAction.bind(null, userId, nextRole), initialState)
-  const [disabledState, disabledForm, changingState] = useActionState(setDisabledAction.bind(null, userId, !disabled), initialState)
-  const [resetState, resetForm, resetting] = useActionState(resetPasswordAction.bind(null, userId), initialPasswordState)
+  const [roleState, roleForm, changingRole] = useActionState(setRole, initialState)
+  const [disabledState, disabledForm, changingState] = useActionState(setDisabled, initialState)
+  const [resetState, resetForm, resetting] = useActionState(resetPassword, initialPasswordState)
   const errors = [roleState.error, disabledState.error, resetState.error].filter((error) => error !== undefined)
 
   return (

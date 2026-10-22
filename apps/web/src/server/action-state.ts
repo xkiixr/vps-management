@@ -19,3 +19,10 @@ export type IssuedPassword = { email: string; password: string }
 
 /** The state of a form that can hand out a generated password (creating a user, resetting a password). */
 export type PasswordState = ActionState & { issued?: IssuedPassword }
+
+/**
+ * An action as `useActionState` takes it: the state before, the form, the state after. A page binds the arguments
+ * of a server action (`deleteProjectAction.bind(null, name)`) and passes the result to its form as a prop of this
+ * type. The form must not bind anything itself: see test/no-inner-bind.test.ts for why.
+ */
+export type FormAction<State> = (previous: State, formData: FormData) => Promise<State>

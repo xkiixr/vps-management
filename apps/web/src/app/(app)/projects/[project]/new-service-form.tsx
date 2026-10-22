@@ -4,12 +4,12 @@ import { useActionState } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { TextField } from '@/components/text-field'
-import { type ActionState, createServiceAction } from '@/server/actions/services'
+import type { ActionState, FormAction } from '@/server/action-state'
 
 const initialState: ActionState = {}
 
-export function NewServiceForm({ projectName, maxMemoryMb }: { projectName: string; maxMemoryMb: number }) {
-  const [state, formAction, pending] = useActionState(createServiceAction.bind(null, projectName), initialState)
+export function NewServiceForm({ maxMemoryMb, action }: { maxMemoryMb: number; action: FormAction<ActionState> }) {
+  const [state, formAction, pending] = useActionState(action, initialState)
   const errors = state.fieldErrors ?? {}
   // React empties the form once its action is done; what was typed comes back from the action when it failed.
   const typed = state.values ?? {}

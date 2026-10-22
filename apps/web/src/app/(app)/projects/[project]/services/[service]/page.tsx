@@ -7,6 +7,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { formatDateTime } from '@/lib/format'
+import { deployAction, restartAction } from '@/server/actions/deployments'
+import { deleteServiceAction, saveServiceSettingsAction } from '@/server/actions/services'
 import { webConfig } from '@/server/config'
 import { getDb } from '@/server/db'
 import { requireUser } from '@/server/guards'
@@ -96,7 +98,11 @@ export default async function ServicePage({ params }: Props) {
         </TabsList>
 
         <TabsContent value="deployments" className="mt-4 grid gap-4">
-          <DeployActions projectName={project.name} serviceName={service.name} canRestart={row.live !== null} />
+          <DeployActions
+            canRestart={row.live !== null}
+            deploy={deployAction.bind(null, project.name, service.name)}
+            restart={restartAction.bind(null, project.name, service.name)}
+          />
           <Card>
             <CardContent>
               <DeploymentsTable
@@ -121,7 +127,11 @@ export default async function ServicePage({ params }: Props) {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <SettingsForm projectName={project.name} serviceName={service.name} current={settings} maxMemoryMb={maxMemoryMb} />
+              <SettingsForm
+                current={settings}
+                maxMemoryMb={maxMemoryMb}
+                action={saveServiceSettingsAction.bind(null, project.name, service.name)}
+              />
             </CardContent>
           </Card>
         </TabsContent>
@@ -136,7 +146,7 @@ export default async function ServicePage({ params }: Props) {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <DeleteServiceForm projectName={project.name} serviceName={service.name} />
+              <DeleteServiceForm serviceName={service.name} action={deleteServiceAction.bind(null, project.name, service.name)} />
             </CardContent>
           </Card>
         </TabsContent>

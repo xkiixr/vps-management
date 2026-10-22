@@ -125,8 +125,10 @@ describe('DeploymentsTable', () => {
 })
 
 describe('DeployActions', () => {
+  // The page binds the actions and hands them over; what they do is not looked at here.
+  const noAction = async () => ({})
   const render = (canRestart: boolean) =>
-    renderToStaticMarkup(createElement(DeployActions, { projectName: 'shop', serviceName: 'web', canRestart }))
+    renderToStaticMarkup(createElement(DeployActions, { canRestart, deploy: noAction, restart: noAction }))
 
   test('has Deploy and Restart buttons', () => {
     const html = render(true)
