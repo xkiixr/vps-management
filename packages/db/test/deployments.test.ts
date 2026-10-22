@@ -4,6 +4,7 @@ import { DEFAULT_BUILD_CONFIG, type DeploymentStatus } from '@vpsm/core'
 import {
   appendDeploymentLogs,
   claimNextDeployment,
+  closeAbandonedLogs,
   createAppService,
   createProject,
   DEPLOYMENT_LOG_CHANNEL,
@@ -15,6 +16,7 @@ import {
   InvalidTransitionError,
   loadDeploymentContext,
   markDeploymentLive,
+  markLogsClosed,
   setDeploymentStatus,
   ValidationError,
 } from '../src/index'
@@ -415,4 +417,56 @@ test('loadDeploymentContext throws for a missing deployment', async () => {
   await expect(loadDeploymentContext(db, '00000000-0000-0000-0000-000000000000')).rejects.toThrow(
     'deployment 00000000-0000-0000-0000-000000000000 not found',
   )
+})
+
+test('a new deployment has not closed its log', async () => {
+  const d = await enqueueDeployment(db, { serviceInstanceId, trigger: 'manual' })
+  expect(d.logsClosedAt).toBeNull()
+  expect((await get(d.id)).logsClosedAt).toBeNull()
+})
+
+test('a status that is final does not close the log: only markLogsClosed does', async () => {
+  const live = await liveDeployment(serviceInstanceId)
+  expect(live.status).toBe('SUCCESS')
+  expect((await get(live.id)).logsClosedAt).toBeNull()
+  const failed = await enqueueDeployment(db, { serviceInstanceId, trigger: 'manual' })
+  await setDeploymentStatus(db, failed.id, 'FAILED', { failureReason: 'x' })
+  expect((await get(failed.id)).logsClosedAt).toBeNull()
+})
+
+test('markLogsClosed stamps that deployment once, and only that one', async () => {
+  const a = await enqueueDeployment(db, { serviceInstanceId, trigger: 'manual' })
+  const b = await enqueueDeployment(db, { serviceInstanceId, trigger: 'manual' })
+  await markLogsClosed(db, b.id)
+  const first = (await get(b.id)).logsClosedAt
+  expect(first).toBeInstanceOf(Date)
+  expect(Math.abs(first!.getTime() - Date.now())).toBeLessThan(10_000)
+  expect((await get(a.id)).logsClosedAt).toBeNull()
+
+  await markLogsClosed(db, b.id)
+  expect((await get(b.id)).logsClosedAt).toEqual(first)
+})
+
+test('markLogsClosed does nothing for an id that is no deployment', async () => {
+  await markLogsClosed(db, '00000000-0000-0000-0000-000000000000')
+  await markLogsClosed(db, 'not-a-uuid')
+})
+
+test('closeAbandonedLogs closes the log of every deployment that is over and counts them, and leaves the others', async () => {
+  const make = async (status: DeploymentStatus) => {
+    const d = await enqueueDeployment(db, { serviceInstanceId, trigger: 'manual' })
+    await db.update(deployments).set({ status }).where(eq(deployments.id, d.id))
+    return d.id
+  }
+  const over = [await make('SUCCESS'), await make('FAILED'), await make('CRASHED'), await make('REMOVED')]
+  const open = [await make('QUEUED'), await make('BUILDING'), await make('DEPLOYING')]
+  const closedEarlier = await make('FAILED')
+  await markLogsClosed(db, closedEarlier)
+  const stamp = (await get(closedEarlier)).logsClosedAt
+
+  expect(await closeAbandonedLogs(db)).toBe(over.length)
+  for (const id of over) expect((await get(id)).logsClosedAt).toBeInstanceOf(Date)
+  for (const id of open) expect((await get(id)).logsClosedAt).toBeNull()
+  expect((await get(closedEarlier)).logsClosedAt).toEqual(stamp)
+  expect(await closeAbandonedLogs(db)).toBe(0)
 })

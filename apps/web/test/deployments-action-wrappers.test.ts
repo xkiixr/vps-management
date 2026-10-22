@@ -198,15 +198,36 @@ describe('restartAction', () => {
 })
 
 describe('rollbackAction', () => {
+  // A second deployment goes live after the one `shopWithLiveWeb` made, so that one is an older one.
+  async function replaceLive(instanceId: string) {
+    const queued = await enqueueDeployment(t.db, { serviceInstanceId: instanceId, trigger: 'push' })
+    await claimNextDeployment(t.db)
+    await setDeploymentStatus(t.db, queued.id, 'BUILDING')
+    await setDeploymentStatus(t.db, queued.id, 'DEPLOYING', { imageTag: 'img:2' })
+    await setDeploymentStatus(t.db, queued.id, 'SUCCESS', { containerName: 'vpsm-web-2' })
+    return queued
+  }
+
   test('queues a rollback to the deployment bound to it, says so and refreshes the pages', async () => {
-    const { live } = await shopWithLiveWeb()
+    const { instance, live } = await shopWithLiveWeb()
+    await replaceLive(instance.id)
     expect(await rollbackAction('shop', 'web', live.id, NO_STATE, NO_FORM)).toEqual({ notice: 'Rollback queued.' })
-    expect(await triggers()).toEqual(['push', 'rollback'])
+    expect(await triggers()).toEqual(['push', 'push', 'rollback'])
     expect(await auditActions()).toEqual(['deployment.rollback'])
     const [row] = await t.sql`select rollback_of_id from deployments where trigger = 'rollback'`
     expect(row!.rollback_of_id).toBe(live.id)
     expect(mocks.revalidatePath).toHaveBeenCalledWith('/projects/shop/services/web')
     expect(mocks.revalidatePath).toHaveBeenCalledWith('/projects/shop')
+  })
+
+  test('the deployment that is live is refused with a pointer to Restart', async () => {
+    const { live } = await shopWithLiveWeb()
+    expect(await rollbackAction('shop', 'web', live.id, NO_STATE, NO_FORM)).toEqual({
+      error: 'this deployment is already running — use Restart',
+    })
+    expect(await triggers()).toEqual(['push'])
+    expect(await auditActions()).toEqual([])
+    expect(mocks.revalidatePath).not.toHaveBeenCalled()
   })
 
   test('a deployment without an image is refused with the reason', async () => {

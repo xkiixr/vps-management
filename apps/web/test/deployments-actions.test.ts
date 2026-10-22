@@ -29,6 +29,7 @@ const SITE = { httpsPort: 443 }
 const NO_IMAGE = 'this deployment has no image to roll back to'
 const NOTHING_RUNNING = 'nothing is running to restart'
 const ALREADY_QUEUED = 'a deployment is already queued for this service'
+const ALREADY_RUNNING = 'this deployment is already running — use Restart'
 
 let ada: SafeUser
 let bob: SafeUser
@@ -300,6 +301,29 @@ describe('doRollback', () => {
     ])
   })
 
+  test('the deployment that is live is refused with a pointer to Restart, and nothing is queued or audited', async () => {
+    const instance = await shopWithWeb()
+    await finish(instance.id, 'live', 'img:old')
+    const live = await finish(instance.id, 'live', 'img:new')
+    const before = await deploymentRows()
+    expect(await doRollback(t.db, actorOf(ada), 'shop', 'web', live.id, SITE)).toEqual({ error: ALREADY_RUNNING })
+    expect(await deploymentRows()).toEqual(before)
+    expect(await auditRows()).toEqual([])
+  })
+
+  test('a deployment that was live and has been replaced is not refused', async () => {
+    const instance = await shopWithWeb()
+    const old = await finish(instance.id, 'live', 'img:old')
+    await finish(instance.id, 'live', 'img:new')
+    expect(await doRollback(t.db, actorOf(ada), 'shop', 'web', old.id, SITE)).toEqual({ notice: 'Rollback queued.' })
+  })
+
+  test('a crashed deployment has no live one, so it can be rolled back to', async () => {
+    const instance = await shopWithWeb()
+    const crashed = await finish(instance.id, 'crashed')
+    expect(await doRollback(t.db, actorOf(ada), 'shop', 'web', crashed.id, SITE)).toEqual({ notice: 'Rollback queued.' })
+  })
+
   test('a deployment that failed after building its image can be rolled back to', async () => {
     const instance = await shopWithWeb()
     const failed = await finish(instance.id, 'failed-with-image')
@@ -368,7 +392,8 @@ describe('doRollback', () => {
   test('an admin who is not a member may roll back', async () => {
     const instance = await shopWithWeb()
     const old = await finish(instance.id, 'live')
+    await finish(instance.id, 'live')
     expect(await doRollback(t.db, actorOf(root), 'shop', 'web', old.id, SITE)).toEqual({ notice: 'Rollback queued.' })
-    expect((await deploymentRows())[1]).toMatchObject({ trigger: 'rollback', created_by_id: root.id })
+    expect((await deploymentRows()).find((row) => row.trigger === 'rollback')).toMatchObject({ created_by_id: root.id })
   })
 })

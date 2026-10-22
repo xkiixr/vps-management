@@ -16,6 +16,7 @@ import { type Site, visibleService } from './services'
 
 export const NOTHING_RUNNING_MESSAGE = 'nothing is running to restart'
 export const NO_IMAGE_MESSAGE = 'this deployment has no image to roll back to'
+export const ALREADY_RUNNING_MESSAGE = 'this deployment is already running — use Restart'
 export const DEPLOY_QUEUED_NOTICE = 'Deployment queued.'
 export const RESTART_QUEUED_NOTICE = 'Restart queued.'
 export const ROLLBACK_QUEUED_NOTICE = 'Rollback queued.'
@@ -81,8 +82,8 @@ export async function doRestart(
 /**
  * Queues a rollback: the image of an earlier deployment of this service is deployed again. `deploymentId` comes
  * from the browser. It must be a deployment of this service: one of another service or project is NotFound,
- * with nothing to tell it from an id that does not exist. One of this service that never got an image has
- * nothing to roll back to, and says so.
+ * with nothing to tell it from an id that does not exist. The one that is live is refused (use Restart), and one
+ * of this service that never got an image has nothing to roll back to; both say so.
  */
 export async function doRollback(
   db: Db,
@@ -95,6 +96,8 @@ export async function doRollback(
   const { project, row } = await visibleService(db, actor, projectName, serviceName, site.httpsPort)
   const target = typeof deploymentId === 'string' ? await findDeploymentInProject(db, project.id, deploymentId) : null
   if (!target || target.serviceInstanceId !== row.instance.id) throw new NotFoundError()
+  // Deploying the image that is already live again is what Restart is for.
+  if (target.id === row.live?.id) return { error: ALREADY_RUNNING_MESSAGE }
   if (!target.imageTag) return { error: NO_IMAGE_MESSAGE }
 
   const queued = await enqueueDeployment(db, {

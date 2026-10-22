@@ -31,6 +31,13 @@ import { fakeDeps, type FakeDeps } from './fakes'
 const history = vi.hoisted(() => new Map<string, string[]>())
 // Set to make the next loadDeploymentContext call throw this error.
 const loadFailure = vi.hoisted(() => ({ error: undefined as Error | undefined }))
+// What the database held at the moment the worker closed the log of a deployment, and a failure to inject there.
+const closing = vi.hoisted(() => ({
+  observe: undefined as ((id: string) => Promise<ClosingSnapshot>) | undefined,
+  snapshots: new Map<string, ClosingSnapshot>(),
+  error: undefined as Error | undefined,
+}))
+type ClosingSnapshot = { status: string; closedAt: Date | null; lines: string[] }
 
 vi.mock('@vpsm/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@vpsm/db')>()
@@ -45,6 +52,13 @@ vi.mock('@vpsm/db', async (importOriginal) => {
       record(args[1].deploymentId, 'SUCCESS')
       if (args[1].previousId !== undefined) record(args[1].previousId, 'REMOVED')
       return actual.markDeploymentLive(...args)
+    },
+    markLogsClosed: async (...args: Parameters<typeof actual.markLogsClosed>) => {
+      if (closing.observe) closing.snapshots.set(args[1], await closing.observe(args[1]))
+      const error = closing.error
+      closing.error = undefined
+      if (error) throw error
+      return actual.markLogsClosed(...args)
     },
     loadDeploymentContext: async (...args: Parameters<typeof actual.loadDeploymentContext>) => {
       const error = loadFailure.error
@@ -65,6 +79,8 @@ afterAll(() => t.close())
 beforeEach(async () => {
   await t.reset()
   history.clear()
+  closing.snapshots.clear()
+  closing.error = undefined
   loadFailure.error = undefined
   await createProject(db, 'shop')
   const { instance } = await createAppService(db, {
@@ -93,6 +109,12 @@ async function logRows(id: string): Promise<[string, string][]> {
     .where(eq(deploymentLogs.deploymentId, id))
     .orderBy(asc(deploymentLogs.id))
   return rows.map((r) => [r.phase, r.line])
+}
+
+closing.observe = async (id) => {
+  const [row] = await db.select().from(deployments).where(eq(deployments.id, id))
+  const lines = await db.select({ line: deploymentLogs.line }).from(deploymentLogs).where(eq(deploymentLogs.deploymentId, id))
+  return { status: row?.status ?? 'MISSING', closedAt: row?.logsClosedAt ?? null, lines: lines.map((l) => l.line) }
 }
 
 const logLines = async (id: string) => (await logRows(id)).map(([, line]) => line)
@@ -743,6 +765,138 @@ describe('failures', () => {
       await expect(runDeployment(randomUUID(), deps)).resolves.toBeUndefined()
       expect(deps.events).toEqual([])
       expect(error).toHaveBeenCalledOnce()
+    } finally {
+      error.mockRestore()
+    }
+  })
+})
+
+// A deployment's status can be final while its log is still being written: SUCCESS is set before the lines about
+// going live and stopping the old container, FAILED before the failure line reaches the database. So the worker
+// says when the log is complete (`logsClosedAt`), after its last line, and readers of the log wait for that.
+describe('closing the log', () => {
+  test('is left open while the deployment runs, and is closed afterwards', async () => {
+    const d = await queue()
+    const seen: (Date | null)[] = []
+    deps.waitHealthy = async () => {
+      seen.push((await get(d.id)).logsClosedAt)
+      return { ok: true }
+    }
+    await runDeployment(d.id, deps)
+    expect(seen).toEqual([null, null])
+    expect((await get(d.id)).logsClosedAt).toBeInstanceOf(Date)
+  })
+
+  test('on success it is closed after every line, including the ones written after SUCCESS was set', async () => {
+    await liveDeployment('vpsm-web-old00000')
+    const d = await queue()
+    let atStop: { status: string; closedAt: Date | null } | undefined
+    const stop = deps.docker.stopAndRemove.bind(deps.docker)
+    deps.docker.stopAndRemove = async (...args) => {
+      const row = await get(d.id)
+      atStop = { status: row.status, closedAt: row.logsClosedAt }
+      return stop(...args)
+    }
+    await runDeployment(d.id, deps)
+
+    // The window in which a reader used to be told "finished": live, with the log still open.
+    expect(atStop).toEqual({ status: 'SUCCESS', closedAt: null })
+    const snapshot = closing.snapshots.get(d.id)!
+    expect(snapshot.status).toBe('SUCCESS')
+    expect(snapshot.closedAt).toBeNull()
+    expect(snapshot.lines).toEqual(await logLines(d.id))
+    expect(snapshot.lines.at(-1)).toBe('==> Stopping previous container vpsm-web-old00000')
+    expect(snapshot.lines).toContain('==> Live at https://web-shop.apps.example.com')
+    expect((await get(d.id)).logsClosedAt).toBeInstanceOf(Date)
+  })
+
+  test('on failure it is closed after the failure line and the FAILED status', async () => {
+    const d = await queue()
+    deps.waitHealthy = async () => ({ ok: false, reason: 'healthcheck timed out' })
+    await runDeployment(d.id, deps)
+
+    const snapshot = closing.snapshots.get(d.id)!
+    expect(snapshot.status).toBe('FAILED')
+    expect(snapshot.closedAt).toBeNull()
+    expect(snapshot.lines.at(-1)).toBe('==> Deployment failed: healthcheck timed out')
+    expect(snapshot.lines).toEqual(await logLines(d.id))
+    expect((await get(d.id)).logsClosedAt).toBeInstanceOf(Date)
+  })
+
+  test('a build failure closes it too', async () => {
+    const d = await queue()
+    deps.buildImage = async () => {
+      throw new BuildError('docker build failed (exit code 1)')
+    }
+    await runDeployment(d.id, deps)
+    expect(closing.snapshots.get(d.id)).toMatchObject({ status: 'FAILED', closedAt: null })
+    expect(closing.snapshots.get(d.id)!.lines.at(-1)).toBe('==> Deployment failed: docker build failed (exit code 1)')
+    expect((await get(d.id)).logsClosedAt).toBeInstanceOf(Date)
+  })
+
+  test('a step that fails after going live closes it after the failure line', async () => {
+    const d = await queue()
+    deps.regenerateRoutes = async () => {
+      throw new Error('EACCES: permission denied')
+    }
+    const error = silenceConsoleError()
+    try {
+      await runDeployment(d.id, deps)
+    } finally {
+      error.mockRestore()
+    }
+    expect(closing.snapshots.get(d.id)!.lines.at(-1)).toBe('==> Post-deploy step failed: internal error: EACCES: permission denied')
+    expect((await get(d.id)).logsClosedAt).toBeInstanceOf(Date)
+  })
+
+  test('a rollback and a restart close it like any deployment', async () => {
+    const live = await liveDeployment('vpsm-web-old00000')
+    const rollback = await queue('rollback', { rollbackOfId: live.id })
+    await runDeployment(rollback.id, deps)
+    const restart = await queue('restart', { rollbackOfId: rollback.id })
+    await runDeployment(restart.id, deps)
+    expect((await get(rollback.id)).logsClosedAt).toBeInstanceOf(Date)
+    expect((await get(restart.id)).logsClosedAt).toBeInstanceOf(Date)
+  })
+
+  test('a deployment whose context cannot be loaded has no log to wait for: it is closed', async () => {
+    const d = await queue()
+    expect((await claimNextDeployment(db))?.id).toBe(d.id)
+    loadFailure.error = new Error('Connection terminated unexpectedly')
+    const error = silenceConsoleError()
+    try {
+      await runDeployment(d.id, deps)
+    } finally {
+      error.mockRestore()
+    }
+    expect(await get(d.id)).toMatchObject({ status: 'FAILED', logsClosedAt: expect.any(Date) })
+  })
+
+  test('a deployment that is not queued is not touched', async () => {
+    const d = await queue()
+    await setDeploymentStatus(db, d.id, 'SKIPPED')
+    const error = silenceConsoleError()
+    try {
+      await runDeployment(d.id, deps)
+    } finally {
+      error.mockRestore()
+    }
+    expect((await get(d.id)).logsClosedAt).toBeNull()
+    expect(closing.snapshots.has(d.id)).toBe(false)
+  })
+
+  test('failing to close it is reported without the message of the database or the token, and changes nothing else', async () => {
+    deps.config = { ...deps.config, githubToken: 'ghp_secret_token' }
+    const d = await queue()
+    closing.error = new Error('connection lost while talking to ghp_secret_token\nparams: ' + d.id)
+    const error = silenceConsoleError()
+    try {
+      await expect(runDeployment(d.id, deps)).resolves.toBeUndefined()
+      expect(await get(d.id)).toMatchObject({ status: 'SUCCESS', logsClosedAt: null })
+      const reported = error.mock.calls.map((call) => String(call[0])).join('\n')
+      expect(reported).toContain('could not close its log')
+      expect(reported).not.toContain('ghp_secret_token')
+      expect(reported).not.toContain('params:')
     } finally {
       error.mockRestore()
     }

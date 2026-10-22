@@ -41,9 +41,10 @@ export default async function DeploymentPage({ params }: Props) {
   if (!found || found.project.name !== projectName) notFound()
   const { deployment, project, service } = found
 
-  // The status was read first: when it is final, every line has been written, so the lines read now are complete.
+  // Whether the log is closed was read with the deployment, before the lines: the worker closes it after its last
+  // line is written, so a log that was closed then has all its lines now (see doReadLogs).
   const lines = await readLogs(db, deployment.id, 0, LOG_PAGE_SIZE)
-  const finished = isFinished(deployment.status) && lines.length < LOG_PAGE_SIZE
+  const finished = isFinished(deployment) && lines.length < LOG_PAGE_SIZE
 
   return (
     <div className="grid gap-6">

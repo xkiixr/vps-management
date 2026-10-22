@@ -4,23 +4,19 @@ import { useRouter } from 'next/navigation'
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   appendLines,
+  followingStatus,
   LOG_PAGE_SIZE,
   LOG_POLL_INTERVAL_MS,
   type LogLine,
+  type LogProblem,
   type LogsResponse,
   MAX_RENDERED_LINES,
+  stoppedReason,
 } from '@/lib/logs'
 
 // How close to the bottom (in pixels) still counts as "at the bottom", so a pixel of rounding does not stop the
 // log from following the new lines.
 const BOTTOM_SLACK = 24
-
-type Problem = 'signed-out' | 'gone' | 'offline'
-const PROBLEMS: Record<Problem, string> = {
-  'signed-out': 'Your session has ended. Sign in again to keep following the log.',
-  gone: 'This deployment is no longer available.',
-  offline: 'Could not reach the server. Trying again…',
-}
 
 function isLogsResponse(value: unknown): value is LogsResponse {
   const body = value as Partial<LogsResponse> | null
@@ -53,7 +49,7 @@ export function LogViewer({
   const router = useRouter()
   const [view, setView] = useState(() => appendLines([], initialLines))
   const [finished, setFinished] = useState(initialFinished)
-  const [problem, setProblem] = useState<Problem | null>(null)
+  const [problem, setProblem] = useState<LogProblem | null>(null)
   // Where the next request starts, and how long to wait before the first one: at once if the page was rendered
   // with a full page of lines, as there may be more waiting. Later renders of the page pass other initial
   // values; they must not restart the polling, so these are only read once.
@@ -127,9 +123,7 @@ export function LogViewer({
   return (
     <div className="grid gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span aria-live="polite">
-          {finished ? 'Finished. No more lines will come.' : 'Following the log. New lines show up every 3 seconds.'}
-        </span>
+        <span aria-live="polite">{followingStatus(finished, problem)}</span>
         {view.dropped > 0 && (
           <span>
             Showing the last {MAX_RENDERED_LINES.toLocaleString('en-US')} lines ({view.dropped.toLocaleString('en-US')} older{' '}
@@ -137,9 +131,9 @@ export function LogViewer({
           </span>
         )}
       </div>
-      {problem !== null && (
+      {stoppedReason(problem) !== null && (
         <p role="alert" className="text-sm text-destructive">
-          {PROBLEMS[problem]}
+          {stoppedReason(problem)}
         </p>
       )}
       <div

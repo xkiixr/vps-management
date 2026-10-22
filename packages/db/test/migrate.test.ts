@@ -94,3 +94,48 @@ test('the auth and access migration applies to a database that already has deplo
     await scratch.end()
   }
 })
+
+test('the logs_closed_at migration closes the log of every deployment that is over, and of no other', async () => {
+  // A copy of the migrations folder that stops before it, to build the "before" state.
+  const baseline = await mkdtemp(path.join(tmpdir(), 'vpsm-migrations-'))
+  scratchDirs.push(baseline)
+  const journal = await readJournal(migrationsDir)
+  const before = journal.entries.filter((entry) => entry.tag < '0002')
+  expect(before.length).toBe(journal.entries.length - 1)
+  await mkdir(path.join(baseline, 'meta'))
+  for (const entry of before) await cp(path.join(migrationsDir, `${entry.tag}.sql`), path.join(baseline, `${entry.tag}.sql`))
+  await writeFile(path.join(baseline, 'meta', '_journal.json'), JSON.stringify({ ...journal, entries: before }))
+
+  const url = await createScratchDatabase()
+  await migrate(url, baseline)
+
+  const scratch = postgres(url, { onnotice: () => {} })
+  try {
+    await scratch`insert into projects (name) values ('shop')`
+    await scratch`insert into environments (project_id, name) select id, 'production' from projects`
+    await scratch`insert into services (project_id, name) select id, 'web' from projects`
+    await scratch`
+      insert into service_instances (service_id, environment_id, build, deploy)
+      select s.id, e.id, '{}'::jsonb, '{}'::jsonb from services s, environments e`
+    const statuses = ['QUEUED', 'BUILDING', 'DEPLOYING', 'SUCCESS', 'FAILED', 'CRASHED', 'REMOVED', 'SKIPPED']
+    for (const status of statuses) {
+      await scratch`
+        insert into deployments (service_instance_id, trigger, status, finished_at)
+        select id, 'manual', ${status}, ${status === 'FAILED' ? new Date('2026-01-02T03:04:05Z') : null} from service_instances`
+    }
+
+    await migrate(url)
+
+    const rows = await scratch`select status, logs_closed_at, finished_at from deployments`
+    const byStatus = new Map(rows.map((row) => [row.status as string, row]))
+    for (const status of ['QUEUED', 'BUILDING', 'DEPLOYING']) expect(byStatus.get(status)!.logs_closed_at).toBeNull()
+    for (const status of ['SUCCESS', 'CRASHED', 'REMOVED', 'SKIPPED']) {
+      const closed = byStatus.get(status)!.logs_closed_at as Date
+      expect(Math.abs(closed.getTime() - Date.now())).toBeLessThan(60_000)
+    }
+    // Closed when it finished, where that is known.
+    expect((byStatus.get('FAILED')!.logs_closed_at as Date).toISOString()).toBe('2026-01-02T03:04:05.000Z')
+  } finally {
+    await scratch.end()
+  }
+})

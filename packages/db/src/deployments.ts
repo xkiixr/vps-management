@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
 import { canTransition, type DeploymentStatus, type DeploymentTrigger } from '@vpsm/core'
 import type { Db } from './client'
 import { ValidationError } from './errors'
+import { isUuid } from './input'
 import {
   type Deployment,
   deploymentLogs,
@@ -190,6 +191,34 @@ export async function appendDeploymentLogs(
     }
     await notify(tx, DEPLOYMENT_LOG_CHANNEL, deploymentId)
   })
+}
+
+/**
+ * Records that nothing more will be written to the deployment's log. The worker calls it once the log sink is
+ * drained, after the final status: the status alone says nothing about the tail of the log (SUCCESS is set
+ * before the last lines about going live and stopping the old container, FAILED before the failure line is
+ * written), so a reader that wants to stop asking waits for this. Calling it again keeps the first time.
+ */
+export async function markLogsClosed(db: Db, deploymentId: string): Promise<void> {
+  if (!isUuid(deploymentId)) return
+  await db
+    .update(deployments)
+    .set({ logsClosedAt: sql`now()` })
+    .where(and(eq(deployments.id, deploymentId), isNull(deployments.logsClosedAt)))
+}
+
+/**
+ * For the start of the worker, when nothing is running: closes the log of every deployment that is over but whose
+ * log was never closed, because the worker stopped between its final status and the end of its log (a live
+ * deployment stays SUCCESS while the old container is drained). Returns how many were closed.
+ */
+export async function closeAbandonedLogs(db: Db): Promise<number> {
+  const closed = await db
+    .update(deployments)
+    .set({ logsClosedAt: sql`now()` })
+    .where(and(isNull(deployments.logsClosedAt), inArray(deployments.status, ['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED'])))
+    .returning({ id: deployments.id })
+  return closed.length
 }
 
 export async function loadDeploymentContext(db: Db, deploymentId: string): Promise<DeploymentContext> {

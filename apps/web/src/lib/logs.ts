@@ -14,11 +14,36 @@ export type LogLine = { id: number; phase: 'build' | 'deploy'; line: string }
 /** What `GET /api/deployments/<id>/logs?after=<n>` answers. `lastId` is `after` itself when there is nothing new. */
 export type LogsResponse = { lines: LogLine[]; lastId: number; finished: boolean }
 
-// No more log lines are written once a deployment is in one of these.
-const FINISHED_STATUSES: readonly DeploymentStatus[] = ['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED', 'SKIPPED']
+// After these the log is complete once the worker has closed it (`logsClosedAt`): the status is set before the
+// last lines are written (SUCCESS before the lines about going live, FAILED before the failure line), so the
+// status alone does not say that nothing more will come.
+const OVER_STATUSES: readonly DeploymentStatus[] = ['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED']
 
-export function isFinished(status: DeploymentStatus): boolean {
-  return FINISHED_STATUSES.includes(status)
+/**
+ * True when no more log lines will be written, and a reader of the log may stop asking: the worker closed the log
+ * of a deployment that is over, or the deployment never ran (SKIPPED: a newer one replaced it while it waited).
+ */
+export function isFinished(deployment: { status: DeploymentStatus; logsClosedAt: Date | null }): boolean {
+  if (deployment.status === 'SKIPPED') return true
+  return OVER_STATUSES.includes(deployment.status) && deployment.logsClosedAt !== null
+}
+
+/** Why the viewer is not getting new lines: the answer will not change (`signed-out`, `gone`) or it may (`offline`). */
+export type LogProblem = 'signed-out' | 'gone' | 'offline'
+
+/** What the line above the log says about whether it is being followed. */
+export function followingStatus(finished: boolean, problem: LogProblem | null): string {
+  if (finished) return 'Finished. No more lines will come.'
+  if (problem === 'signed-out' || problem === 'gone') return 'Stopped following the log.'
+  if (problem === 'offline') return 'Could not reach the server. Trying again…'
+  return 'Following the log. New lines show up every 3 seconds.'
+}
+
+/** What the viewer tells the reader when it stopped for good; null while it is still trying. */
+export function stoppedReason(problem: LogProblem | null): string | null {
+  if (problem === 'signed-out') return 'Your session has ended. Sign in again to keep following the log.'
+  if (problem === 'gone') return 'This deployment is no longer available.'
+  return null
 }
 
 /**

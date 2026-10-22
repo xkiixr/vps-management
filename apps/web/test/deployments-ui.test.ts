@@ -37,6 +37,7 @@ function deployment(fields: Partial<DeploymentRow> = {}): DeploymentRow {
     claimedAt: null,
     startedAt: null,
     finishedAt: null,
+    logsClosedAt: null,
     createdByEmail: null,
     ...fields,
   } satisfies Deployment & { createdByEmail: string | null }

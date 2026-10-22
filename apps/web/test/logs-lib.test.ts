@@ -1,15 +1,69 @@
 import { describe, expect, test } from 'vitest'
 import { DEPLOYMENT_STATUSES } from '@vpsm/core'
-import { appendLines, isFinished, type LogLine, MAX_RENDERED_LINES } from '@/lib/logs'
+import { appendLines, followingStatus, isFinished, type LogLine, MAX_RENDERED_LINES, stoppedReason } from '@/lib/logs'
 import { parseAfter } from '@/server/logs'
 
 const line = (id: number, text = `line ${id}`): LogLine => ({ id, phase: 'build', line: text })
 const lines = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => line(from + i))
 
 describe('isFinished', () => {
-  test('is true for the statuses after which no line is written, false for the others', () => {
-    const finished = DEPLOYMENT_STATUSES.filter((status) => isFinished(status))
-    expect(finished).toEqual(['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED', 'SKIPPED'])
+  const closed = new Date('2026-10-22T10:00:00Z')
+
+  test('a deployment that is over is finished once its log is closed, and not before', () => {
+    for (const status of ['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED'] as const) {
+      expect(isFinished({ status, logsClosedAt: closed })).toBe(true)
+      expect(isFinished({ status, logsClosedAt: null })).toBe(false)
+    }
+  })
+
+  test('a skipped deployment never ran, so it is finished whatever its log says', () => {
+    expect(isFinished({ status: 'SKIPPED', logsClosedAt: null })).toBe(true)
+    expect(isFinished({ status: 'SKIPPED', logsClosedAt: closed })).toBe(true)
+  })
+
+  test('a deployment that is still going is never finished, closed log or not', () => {
+    for (const status of ['QUEUED', 'BUILDING', 'DEPLOYING'] as const) {
+      expect(isFinished({ status, logsClosedAt: null })).toBe(false)
+      expect(isFinished({ status, logsClosedAt: closed })).toBe(false)
+    }
+  })
+
+  test('says something for every status', () => {
+    expect(DEPLOYMENT_STATUSES.map((status) => isFinished({ status, logsClosedAt: closed }))).toEqual([
+      false, // QUEUED
+      false, // BUILDING
+      false, // DEPLOYING
+      true, // SUCCESS
+      true, // FAILED
+      true, // CRASHED
+      true, // REMOVED
+      true, // SKIPPED
+    ])
+  })
+})
+
+describe('followingStatus', () => {
+  test('says it is following only while it is', () => {
+    expect(followingStatus(false, null)).toContain('Following the log')
+    expect(followingStatus(true, null)).toBe('Finished. No more lines will come.')
+  })
+
+  test('does not say "Following" once it stopped for good, or while it cannot reach the server', () => {
+    for (const problem of ['signed-out', 'gone', 'offline'] as const) {
+      expect(followingStatus(false, problem)).not.toContain('Following the log')
+    }
+    expect(followingStatus(false, 'signed-out')).toBe('Stopped following the log.')
+    expect(followingStatus(false, 'gone')).toBe('Stopped following the log.')
+    expect(followingStatus(false, 'offline')).toContain('Trying again')
+  })
+})
+
+describe('stoppedReason', () => {
+  test('explains the two problems that end the following, and nothing else', () => {
+    expect(stoppedReason('signed-out')).toContain('Sign in again')
+    expect(stoppedReason('gone')).toContain('no longer available')
+    expect(stoppedReason('offline')).toBeNull()
+    expect(stoppedReason(null)).toBeNull()
   })
 })
 

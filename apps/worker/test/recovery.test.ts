@@ -12,6 +12,7 @@ import {
   deployments,
   enqueueDeployment,
   markDeploymentLive,
+  markLogsClosed,
   setDeploymentStatus,
 } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
@@ -97,6 +98,41 @@ test('interrupted deployments become FAILED and orphans are removed, live one un
   expect(deps.events).toContain('routes')
   // Routes stop pointing at an orphan before it is removed.
   expect(deps.events).toEqual(['routes', 'stop vpsm-web-d1000000'])
+})
+
+test('the log of an interrupted deployment is closed: no worker will write to it any more', async () => {
+  const b1 = await building()
+  const d1 = await deploying()
+  const q1 = await queue()
+  expect((await claimNextDeployment(db))?.id).toBe(q1.id)
+  const q2 = await queue()
+
+  await recoverInterruptedDeployments(deps)
+
+  for (const d of [b1, d1, q1]) {
+    const row = await get(d)
+    expect(row.status).toBe('FAILED')
+    expect(row.logsClosedAt).toBeInstanceOf(Date)
+  }
+  // Still waiting for a worker: it will run, and write a log.
+  expect((await get(q2)).logsClosedAt).toBeNull()
+})
+
+test('the log of a deployment that is over but was never closed is closed too (the worker stopped while draining the old container)', async () => {
+  const liveOne = await live('vpsm-web-live0000')
+  seed('vpsm-web-live0000', liveOne.id)
+  const failed = await queue()
+  await setDeploymentStatus(db, failed.id, 'FAILED', { failureReason: 'x' })
+  const closedEarlier = await queue()
+  await setDeploymentStatus(db, closedEarlier.id, 'FAILED', { failureReason: 'y' })
+  await markLogsClosed(db, closedEarlier.id)
+  const stamp = (await get(closedEarlier)).logsClosedAt
+
+  await recoverInterruptedDeployments(deps)
+
+  expect((await get(liveOne)).logsClosedAt).toBeInstanceOf(Date)
+  expect((await get(failed)).logsClosedAt).toBeInstanceOf(Date)
+  expect((await get(closedEarlier)).logsClosedAt).toEqual(stamp)
 })
 
 test('starts live containers that are stopped (e.g. after a host reboot) and marks vanished ones CRASHED, before routing', async () => {

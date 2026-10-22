@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { and, eq, inArray, isNotNull, or } from 'drizzle-orm'
-import { deployments, setDeploymentStatus } from '@vpsm/db'
+import { closeAbandonedLogs, deployments, markLogsClosed, setDeploymentStatus } from '@vpsm/db'
 import { removeOrphanedContainers } from '../maintenance/sweep'
 import { ensureNetworkAttachments } from '../monitor/network-attachments'
 import { reconcileLiveDeployments } from '../monitor/reconcile'
@@ -12,7 +12,8 @@ const INTERRUPTED_REASON = 'worker restarted during deployment'
 /**
  * Run once at startup, before the deploy loop: no deployment can be running yet, so anything the last
  * worker left mid-flight is cleaned up, in this order:
- * 1. claimed deployments (QUEUED with `claimed_at`, BUILDING, DEPLOYING) become FAILED;
+ * 1. claimed deployments (QUEUED with `claimed_at`, BUILDING, DEPLOYING) become FAILED, and the log of every
+ *    deployment that is over is closed (no log sink is left to do it, see markLogsClosed);
  * 2. the work directory is emptied (a crash can leave a clone with the token in it);
  * 3. live deployments are reconciled: stopped containers are started again (e.g. after a host reboot),
  *    vanished ones CRASHED;
@@ -39,7 +40,10 @@ export async function recoverInterruptedDeployments(
     )
   for (const { id } of interrupted) {
     await setDeploymentStatus(db, id, 'FAILED', { failureReason: INTERRUPTED_REASON })
+    await markLogsClosed(db, id)
   }
+  // Also the ones that went live (or failed) just before the last worker stopped, but were not closed yet.
+  await closeAbandonedLogs(db)
 
   await emptyWorkDir(deps.config.workDir)
   await reconcileLiveDeployments(deps, { startStopped: true })

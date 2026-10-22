@@ -15,6 +15,13 @@
       "when": 1792655089686,
       "tag": "0001_auth_and_access",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792666971808,
+      "tag": "0002_logs_closed_at",
+      "breakpoints": true
     }
   ]
 }

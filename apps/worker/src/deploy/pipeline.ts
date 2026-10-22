@@ -21,6 +21,7 @@ import {
   type DeploymentPatch,
   loadDeploymentContext,
   markDeploymentLive,
+  markLogsClosed,
   setDeploymentStatus,
 } from '@vpsm/db'
 import type { buildImage } from '../build/build-image'
@@ -108,6 +109,8 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
     await setDeploymentStatus(deps.db, deploymentId, 'FAILED', { failureReason: `internal error: ${message}` }).catch(
       () => undefined,
     )
+    // Nothing was logged and nothing will be: whoever reads its log must not wait for more.
+    await closeLog(deps.db, deploymentId, redact)
     return
   }
   if (ctx.deployment.status !== 'QUEUED') {
@@ -134,6 +137,21 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
       console.error(`deployment ${deploymentId}: could not remove ${job.dir}: ${messageOf(error)}`)
     })
     await sink.close()
+    // Last, after the final status and after the last line is in the database: a reader of the log stops when it
+    // sees this, not when it sees a final status (SUCCESS is set before the lines about going live and about
+    // stopping the old container, FAILED before the failure line is written).
+    await closeLog(deps.db, ctx.deployment.id, redact)
+  }
+}
+
+/** Tells readers of the log that it is complete. Best effort: the deployment is over whether or not this works. */
+async function closeLog(db: Db, deploymentId: string, redact: (text: string) => string): Promise<void> {
+  try {
+    await markLogsClosed(db, deploymentId)
+  } catch (error) {
+    // The first line only: the driver puts the statement's parameters on the following ones.
+    const reason = redact(messageOf(error).split('\n', 1)[0] ?? '')
+    console.error(`deployment ${deploymentId}: could not close its log: ${reason}`)
   }
 }
 

@@ -166,6 +166,9 @@ export const deployments = pgTable(
     claimedAt: timestamp('claimed_at', { withTimezone: true }),
     startedAt: timestamp('started_at', { withTimezone: true }),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
+    // When the worker wrote the last log line (see markLogsClosed). A deployment's status can be final while its
+    // tail is still being written, so a reader of the log only stops when this is set.
+    logsClosedAt: timestamp('logs_closed_at', { withTimezone: true }),
   },
   (t) => [
     index('deployments_status_created_at_idx').on(t.status, t.createdAt),

@@ -6,6 +6,7 @@ import {
   createSession,
   createUser,
   enqueueDeployment,
+  markLogsClosed,
   type SafeUser,
 } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
@@ -62,8 +63,8 @@ async function signInAs(user: SafeUser | null) {
 
 const UNKNOWN_ID = '00000000-0000-4000-8000-000000000000'
 
-// Ada's `shop/web` with one deployment; `lines` log lines are written for it, `count` is the number of lines.
-async function shopDeployment(count = 0, status = 'BUILDING') {
+// Ada's `shop/web` with one deployment with `count` log lines, in `status`, and with its log closed if `closed`.
+async function shopDeployment(count = 0, status = 'BUILDING', closed = false) {
   await createProject(t.db, 'shop', ada.id)
   const { instance } = await createAppService(t.db, {
     projectName: 'shop',
@@ -74,6 +75,7 @@ async function shopDeployment(count = 0, status = 'BUILDING') {
   const deployment = await enqueueDeployment(t.db, { serviceInstanceId: instance.id, trigger: 'manual', createdById: ada.id })
   await setStatus(deployment.id, status)
   if (count > 0) await appendDeploymentLogs(t.db, deployment.id, 'build', Array.from({ length: count }, (_, i) => `line ${i + 1}`))
+  if (closed) await markLogsClosed(t.db, deployment.id)
   return { deployment, instance }
 }
 // The status is set directly: these tests are about what the route says of a status, not about the transitions.
@@ -249,32 +251,72 @@ describe('after', () => {
   })
 })
 
+// The worker sets the final status first, then writes the last lines (going live, the failure line), and only then
+// closes the log. Only a closed log is finished: the status alone says nothing about the tail.
 describe('finished', () => {
-  test.each(['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED', 'SKIPPED'])('is true when the status is %s and every line was returned', async (status) => {
-    const { deployment } = await shopDeployment(2, status)
+  test.each(['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED'])('is true when the status is %s and the log is closed', async (status) => {
+    const { deployment } = await shopDeployment(2, status, true)
     expect(await json(await call(deployment.id))).toMatchObject({ finished: true })
   })
 
-  test.each(['QUEUED', 'BUILDING', 'DEPLOYING'])('is false when the status is %s', async (status) => {
-    const { deployment } = await shopDeployment(2, status)
+  test.each(['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED'])('is false when the status is %s but the log is still open', async (status) => {
+    const { deployment } = await shopDeployment(2, status, false)
     expect(await json(await call(deployment.id))).toMatchObject({ finished: false })
   })
 
+  test('is true for SKIPPED, which never ran and has no log to close', async () => {
+    const { deployment } = await shopDeployment(0, 'SKIPPED', false)
+    expect(await json(await call(deployment.id))).toEqual({ lines: [], lastId: 0, finished: true })
+  })
+
+  test.each(['QUEUED', 'BUILDING', 'DEPLOYING'])('is false when the status is %s, also if a log was closed', async (status) => {
+    const { deployment } = await shopDeployment(2, status, true)
+    expect(await json(await call(deployment.id))).toMatchObject({ finished: false })
+  })
+
+  test('with the order of the worker (final status, more lines, then the log closed) it is not finished until the end, and nothing is lost', async () => {
+    const { deployment } = await shopDeployment(2, 'BUILDING')
+    const first = await json(await call(deployment.id))
+    expect(first).toMatchObject({ finished: false })
+
+    // SUCCESS is set before the lines about going live and about the old container.
+    await setStatus(deployment.id, 'SUCCESS')
+    await appendDeploymentLogs(t.db, deployment.id, 'deploy', ['==> Live at https://web-shop.apps.example.com'])
+    const second = await json(await call(deployment.id, `?after=${first.lastId}`))
+    expect(second).toMatchObject({ lines: [{ line: '==> Live at https://web-shop.apps.example.com' }], finished: false })
+
+    await appendDeploymentLogs(t.db, deployment.id, 'deploy', ['==> Stopping previous container vpsm-web-old'])
+    const third = await json(await call(deployment.id, `?after=${second.lastId}`))
+    expect(third).toMatchObject({ lines: [{ line: '==> Stopping previous container vpsm-web-old' }], finished: false })
+
+    await markLogsClosed(t.db, deployment.id)
+    const last = await json(await call(deployment.id, `?after=${third.lastId}`))
+    expect(last).toEqual({ lines: [], lastId: third.lastId, finished: true })
+    const all = await json(await call(deployment.id))
+    expect((all.lines as { line: string }[]).map((l) => l.line)).toEqual([
+      'line 1',
+      'line 2',
+      '==> Live at https://web-shop.apps.example.com',
+      '==> Stopping previous container vpsm-web-old',
+    ])
+  })
+
+  test('the same on failure: FAILED, then the failure line, then closed', async () => {
+    const { deployment } = await shopDeployment(1, 'DEPLOYING')
+    await setStatus(deployment.id, 'FAILED')
+    const before = await json(await call(deployment.id))
+    expect(before.finished).toBe(false)
+    await appendDeploymentLogs(t.db, deployment.id, 'deploy', ['==> Deployment failed: healthcheck timed out'])
+    await markLogsClosed(t.db, deployment.id)
+    const after = await json(await call(deployment.id, `?after=${before.lastId}`))
+    expect(after).toMatchObject({ lines: [{ line: '==> Deployment failed: healthcheck timed out' }], finished: true })
+  })
+
   test('is false while lines of a finished deployment are still to come, and true with the last page', async () => {
-    const { deployment } = await shopDeployment(LOG_PAGE_SIZE + 1, 'FAILED')
+    const { deployment } = await shopDeployment(LOG_PAGE_SIZE + 1, 'FAILED', true)
     const first = await json(await call(deployment.id))
     expect(first).toMatchObject({ finished: false })
     expect(await json(await call(deployment.id, `?after=${first.lastId}`))).toMatchObject({ finished: true })
-  })
-
-  test('a deployment that finishes between two calls is reported finished by the second', async () => {
-    const { deployment } = await shopDeployment(2, 'BUILDING')
-    const first = await json(await call(deployment.id))
-    expect(first.finished).toBe(false)
-    await appendDeploymentLogs(t.db, deployment.id, 'deploy', ['done'])
-    await setStatus(deployment.id, 'SUCCESS')
-    const second = await json(await call(deployment.id, `?after=${first.lastId}`))
-    expect(second).toMatchObject({ lines: [{ phase: 'deploy', line: 'done' }], finished: true })
   })
 })
 
