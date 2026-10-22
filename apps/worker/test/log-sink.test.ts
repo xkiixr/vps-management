@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { asc, eq } from 'drizzle-orm'
-import { afterAll, beforeEach, expect, test, vi } from 'vitest'
+import { afterAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { createAppService, createProject, deploymentLogs, deployments, enqueueDeployment } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
 import { createLogSink } from '../src/deploy/log-sink'
@@ -101,4 +101,62 @@ test('NUL characters, which postgres text cannot hold, are replaced instead of l
     ['build', 'before'],
     ['build', 'binary � junk'],
   ])
+})
+
+// A single line of minified output can be megabytes; every viewer of the deployment would load it.
+describe('a line longer than 8 KiB (UTF-8)', () => {
+  const MAX = 8192
+  const MARK = ' …[truncated]' // 15 bytes, so at most 8177 bytes of the line are kept
+  const bytes = (text: string) => Buffer.byteLength(text, 'utf8')
+
+  /** Logs `text` as the only line of the deployment and returns what was stored. */
+  async function storedLine(text: string): Promise<string> {
+    await db.delete(deploymentLogs).where(eq(deploymentLogs.deploymentId, deploymentId))
+    const sink = createLogSink(db, deploymentId)
+    sink.line('build', text)
+    await sink.close()
+    const rows = await stored()
+    expect(rows).toHaveLength(1)
+    return rows[0]![1]
+  }
+
+  test('is stored as it is up to 8 KiB', async () => {
+    const exact = 'x'.repeat(MAX - 3) + '€' // 8189 + 3 bytes
+    expect(bytes(exact)).toBe(MAX)
+    expect(await storedLine(exact)).toBe(exact)
+  })
+
+  test('is cut to 8 KiB in all, marker included, and says so', async () => {
+    const kept = await storedLine('x'.repeat(MAX + 1))
+    expect(kept).toBe('x'.repeat(MAX - bytes(MARK)) + MARK)
+    expect(bytes(kept)).toBe(MAX)
+  })
+
+  test('is cut between characters, never inside one', async () => {
+    // 2-byte characters: 8177 bytes would end in the middle of one, so one fewer is kept.
+    expect(await storedLine('é'.repeat(5000))).toBe('é'.repeat(4088) + MARK)
+    // 4-byte characters (a surrogate pair each in JavaScript): no half of a pair is left behind.
+    const emoji = await storedLine('😀'.repeat(3000))
+    expect(emoji).toBe('😀'.repeat(2044) + MARK)
+    expect(Buffer.from(emoji, 'utf8').toString('utf8')).toBe(emoji)
+    // Exactly at the limit after a 1-byte character.
+    const fits = await storedLine('a' + '😀'.repeat(3000))
+    expect(fits).toBe('a' + '😀'.repeat(2044) + MARK)
+    expect(bytes(fits)).toBe(MAX)
+  })
+
+  test('NUL characters are replaced before the line is measured', async () => {
+    const kept = await storedLine('\u0000'.repeat(MAX))
+    expect(kept).toBe('�'.repeat(Math.floor((MAX - bytes(MARK)) / 3)) + MARK)
+  })
+
+  test('a huge line becomes one stored line of 8 KiB, and the lines after it are kept', async () => {
+    const sink = createLogSink(db, deploymentId)
+    sink.line('build', 'y'.repeat(5 * 1024 * 1024))
+    sink.line('build', 'after')
+    await sink.close()
+    const rows = await stored()
+    expect(rows.map(([, line]) => bytes(line))).toEqual([MAX, 5])
+    expect(rows[1]).toEqual(['build', 'after'])
+  })
 })

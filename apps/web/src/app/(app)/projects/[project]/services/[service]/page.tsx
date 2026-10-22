@@ -99,7 +99,8 @@ export default async function ServicePage({ params }: Props) {
 
         <TabsContent value="deployments" className="mt-4 grid gap-4">
           <DeployActions
-            canRestart={row.live !== null}
+            // As doRestart decides: a deployment that runs or has crashed (row.current), not only a live one.
+            canRestart={row.current !== null}
             deploy={deployAction.bind(null, project.name, service.name)}
             restart={restartAction.bind(null, project.name, service.name)}
           />

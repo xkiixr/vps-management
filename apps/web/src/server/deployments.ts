@@ -42,10 +42,12 @@ export async function doDeploy(
 }
 
 /**
- * Queues a restart: the image that is live is deployed again without downtime (not `docker restart`). There
- * must be a live deployment (the newest SUCCESS). The worker restarts whatever is live when the restart runs;
- * the one live now is recorded as `rollbackOfId`. While another deployment is waiting the queue refuses, as a
- * restart must never cancel a deploy, and its message is shown as it is.
+ * Queues a restart: the image of the current deployment is deployed again without downtime (not `docker
+ * restart`). The current one is the newest SUCCESS or CRASHED deployment (`row.current`), so a service whose
+ * container crashed can be started again; without one there is nothing to restart. The worker restarts whatever
+ * is current when the restart runs (its `previous`, picked the same way); the one current now is recorded as
+ * `rollbackOfId`. While another deployment is waiting the queue refuses, as a restart must never cancel a deploy,
+ * and its message is shown as it is.
  */
 export async function doRestart(
   db: Db,
@@ -55,14 +57,15 @@ export async function doRestart(
   site: Pick<Site, 'httpsPort'>,
 ): Promise<ActionState> {
   const { project, row } = await visibleService(db, actor, projectName, serviceName, site.httpsPort)
-  if (!row.live) return { error: NOTHING_RUNNING_MESSAGE }
+  const { current } = row
+  if (!current) return { error: NOTHING_RUNNING_MESSAGE }
 
   let queued: Awaited<ReturnType<typeof enqueueDeployment>>
   try {
     queued = await enqueueDeployment(db, {
       serviceInstanceId: row.instance.id,
       trigger: 'restart',
-      rollbackOfId: row.live.id,
+      rollbackOfId: current.id,
       createdById: actor.id,
     })
   } catch (error) {
@@ -74,7 +77,7 @@ export async function doRestart(
     action: 'deployment.restart',
     targetType: 'deployment',
     targetId: queued.id,
-    metadata: { project: project.name, service: row.service.name, rollbackOfId: row.live.id },
+    metadata: { project: project.name, service: row.service.name, rollbackOfId: current.id },
   })
   return { notice: RESTART_QUEUED_NOTICE }
 }
@@ -96,7 +99,8 @@ export async function doRollback(
   const { project, row } = await visibleService(db, actor, projectName, serviceName, site.httpsPort)
   const target = typeof deploymentId === 'string' ? await findDeploymentInProject(db, project.id, deploymentId) : null
   if (!target || target.serviceInstanceId !== row.instance.id) throw new NotFoundError()
-  // Deploying the image that is already live again is what Restart is for.
+  // Deploying the image that is already live again is what Restart is for. A crashed deployment is not live, so
+  // rolling back to it is allowed.
   if (target.id === row.live?.id) return { error: ALREADY_RUNNING_MESSAGE }
   if (!target.imageTag) return { error: NO_IMAGE_MESSAGE }
 

@@ -27,6 +27,13 @@ const LOG_INSERT_BATCH_SIZE = 5000
 
 const FINISHED_STATUSES: readonly DeploymentStatus[] = ['SUCCESS', 'FAILED', 'SKIPPED']
 
+/**
+ * A restart runs the image of the newest deployment in one of these again: the one serving traffic, or the one
+ * whose container crashed. The worker picks it as `previous` (loadDeploymentContext) and the dashboard shows the
+ * same one as `current` (ServiceRow), so Restart is offered exactly when the worker has something to restart.
+ */
+export const RESTARTABLE_STATUSES = ['SUCCESS', 'CRASHED'] as const satisfies readonly DeploymentStatus[]
+
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
 
 export class InvalidTransitionError extends Error {
@@ -251,7 +258,7 @@ export async function loadDeploymentContext(db: Db, deploymentId: string): Promi
       .where(
         and(
           eq(deployments.serviceInstanceId, instance.id),
-          inArray(deployments.status, ['SUCCESS', 'CRASHED']),
+          inArray(deployments.status, [...RESTARTABLE_STATUSES]),
           ne(deployments.id, deployment.id),
         ),
       )

@@ -37,7 +37,7 @@ export function DeployActions({
           type="submit"
           variant="outline"
           disabled={busy || !canRestart}
-          title={canRestart ? 'Deploy the running image again, without downtime' : 'Nothing is running to restart'}
+          title={canRestart ? 'Deploy the image of the current deployment again, without downtime' : 'Nothing is running to restart'}
         >
           {restarting ? 'Queuing…' : 'Restart'}
         </Button>

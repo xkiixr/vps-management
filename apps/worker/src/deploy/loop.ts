@@ -1,10 +1,13 @@
-import { CLEANUP_CHANNEL, claimNextDeployment, DEPLOYMENTS_CHANNEL } from '@vpsm/db'
+import { CLEANUP_CHANNEL, claimNextDeployment, DEPLOYMENTS_CHANNEL, purgeExpiredSessions } from '@vpsm/db'
 import { sweepOrphans } from '../maintenance/sweep'
 import { type PipelineDeps, runDeployment } from './pipeline'
 
 /** Catches anything a missed notification (e.g. during a database reconnect) left in the queue. */
 const POLL_INTERVAL_MS = 5000
-/** Catches deletions whose notification was missed, and anything an earlier sweep could not remove. */
+/**
+ * Catches deletions whose notification was missed, and anything an earlier sweep could not remove. Expired
+ * dashboard sessions are purged at the same time.
+ */
 const SWEEP_INTERVAL_MS = 60_000
 
 export type DeployLoopDeps = PipelineDeps & {
@@ -19,9 +22,10 @@ const messageOf = (error: unknown) => (error instanceof Error ? error.message : 
  * (NOTIFY) and every 5 seconds. Between two deployments, never during one, it runs the orphan sweep when
  * one was requested: by a NOTIFY on the cleanup channel (a service or project was deleted) or every 60
  * seconds. The sweep would take the container of a running deployment for an orphan (it is not SUCCESS
- * yet), and a deployment claimed while a sweep runs waits for it. Once `signal` aborts it stops listening
- * and claiming; the returned promise resolves when the deployment or sweep that was running at that moment
- * (if any) has finished.
+ * yet), and a deployment claimed while a sweep runs waits for it. Each sweep is followed by a purge of the
+ * dashboard's expired sessions (best effort: a failure is logged and the loop carries on). Once `signal`
+ * aborts it stops listening and claiming; the returned promise resolves when the deployment or sweep that
+ * was running at that moment (if any) has finished.
  */
 export async function startDeployLoop(deps: DeployLoopDeps, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return
@@ -46,6 +50,16 @@ export async function startDeployLoop(deps: DeployLoopDeps, signal: AbortSignal)
     }
   }
 
+  // An expired session is refused anyway (resolveSession checks expires_at); this only keeps the table small.
+  const purgeSessions = async () => {
+    try {
+      const purged = await purgeExpiredSessions(deps.db)
+      if (purged > 0) console.log(`session purge: removed ${purged} expired dashboard session(s)`)
+    } catch (error) {
+      console.error(`session purge: ${messageOf(error)}`)
+    }
+  }
+
   /** Runs the oldest queued deployment; false when there was none or it could not be claimed. */
   const deployNext = async (): Promise<boolean> => {
     let next
@@ -67,6 +81,7 @@ export async function startDeployLoop(deps: DeployLoopDeps, signal: AbortSignal)
         if (sweepRequested) {
           sweepRequested = false
           await sweep()
+          await purgeSessions()
         } else if (deployRequested) {
           deployRequested = false
           // The queue may hold more: go round again, after a sweep requested in the meantime.

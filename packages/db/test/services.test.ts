@@ -104,6 +104,54 @@ test('latest is the newest deployment and live the newest successful one', async
   expect((await row()).live).toBeNull()
 })
 
+// --- current: what Restart starts again ----------------------------------------------------------------
+
+test('current is the newest deployment that is running or has crashed, with its status and image', async () => {
+  expect((await row()).current).toBeNull()
+
+  const deployed = await deployCurrentConfig(instanceId)
+  expect((await row()).current).toEqual({ id: deployed.id, status: 'SUCCESS', imageTag: deployed.imageTag })
+
+  await setDeploymentStatus(db, deployed.id, 'CRASHED')
+  const crashed = await row()
+  expect(crashed.live).toBeNull()
+  expect(crashed.current).toEqual({ id: deployed.id, status: 'CRASHED', imageTag: deployed.imageTag })
+})
+
+test('current ignores newer deployments that failed, are building or are waiting', async () => {
+  const deployed = await deployCurrentConfig(instanceId)
+  await setDeploymentStatus(db, deployed.id, 'CRASHED')
+
+  const failed = await enqueueDeployment(db, { serviceInstanceId: instanceId, trigger: 'manual' })
+  await setDeploymentStatus(db, failed.id, 'BUILDING')
+  await setDeploymentStatus(db, failed.id, 'DEPLOYING', { imageTag: `vpsm/${instanceId}:${failed.id}` })
+  await setDeploymentStatus(db, failed.id, 'FAILED', { failureReason: 'health check failed' })
+  const building = await enqueueDeployment(db, { serviceInstanceId: instanceId, trigger: 'manual' })
+  await setDeploymentStatus(db, building.id, 'BUILDING')
+  const waiting = await enqueueDeployment(db, { serviceInstanceId: instanceId, trigger: 'push' })
+
+  const r = await row()
+  expect(r.latest?.id).toBe(waiting.id)
+  expect(r.current).toEqual({ id: deployed.id, status: 'CRASHED', imageTag: deployed.imageTag })
+})
+
+test('current is the newest of them, as the worker picks what a restart runs: a crash replaced by a deploy is not it', async () => {
+  const crashed = await deployCurrentConfig(instanceId)
+  await setDeploymentStatus(db, crashed.id, 'CRASHED')
+  const live = await deployCurrentConfig(instanceId)
+  expect((await row()).current).toEqual({ id: live.id, status: 'SUCCESS', imageTag: live.imageTag })
+})
+
+test('current belongs to its own service', async () => {
+  await deployCurrentConfig(instanceId)
+  await addService('shop', 'api')
+  const rows = await listServices(db, shop.id, OPTS)
+  expect(rows.map((r) => [r.service.name, r.current?.status ?? null])).toEqual([
+    ['api', null],
+    ['web', 'SUCCESS'],
+  ])
+})
+
 test('listServices only lists the given project', async () => {
   await createProject(db, 'blog')
   await addService('blog', 'docs')

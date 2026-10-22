@@ -8,6 +8,7 @@ import {
   validateServiceInput,
 } from '@vpsm/core'
 import type { Db } from './client'
+import { RESTARTABLE_STATUSES } from './deployments'
 import { ValidationError } from './errors'
 import { CONTROL_CHARACTERS, isUuid } from './input'
 import { PRODUCTION_ENVIRONMENT } from './projects'
@@ -37,6 +38,9 @@ export type ServiceRow = {
   latest: Pick<Deployment, 'id' | 'status' | 'createdAt'> | null
   // The newest SUCCESS deployment, i.e. the one serving traffic.
   live: Pick<Deployment, 'id' | 'imageTag' | 'configSnapshot'> | null
+  // The newest SUCCESS or CRASHED deployment: the one a restart runs again (the worker's `previous`, see
+  // RESTARTABLE_STATUSES). It is `live` unless the container of that one crashed.
+  current: Pick<Deployment, 'id' | 'status' | 'imageTag'> | null
 }
 
 // --- reading -------------------------------------------------------------------------------------------
@@ -53,7 +57,7 @@ async function loadServiceRows(db: Db, where: SQL | undefined, httpsPort: number
 
   const ids = rows.map((row) => row.instance.id)
   const newestFirst = [asc(deployments.serviceInstanceId), desc(deployments.createdAt), desc(deployments.id)]
-  const [hostnames, latest, live] = await Promise.all([
+  const [hostnames, latest, live, current] = await Promise.all([
     db
       .selectDistinctOn([domains.serviceInstanceId], { instanceId: domains.serviceInstanceId, hostname: domains.hostname })
       .from(domains)
@@ -79,6 +83,16 @@ async function loadServiceRows(db: Db, where: SQL | undefined, httpsPort: number
       .from(deployments)
       .where(and(inArray(deployments.serviceInstanceId, ids), eq(deployments.status, 'SUCCESS')))
       .orderBy(...newestFirst),
+    db
+      .selectDistinctOn([deployments.serviceInstanceId], {
+        instanceId: deployments.serviceInstanceId,
+        id: deployments.id,
+        status: deployments.status,
+        imageTag: deployments.imageTag,
+      })
+      .from(deployments)
+      .where(and(inArray(deployments.serviceInstanceId, ids), inArray(deployments.status, [...RESTARTABLE_STATUSES])))
+      .orderBy(...newestFirst),
   ])
 
   const byInstance = <T extends { instanceId: string }>(list: T[]) =>
@@ -86,6 +100,7 @@ async function loadServiceRows(db: Db, where: SQL | undefined, httpsPort: number
   const hostnameOf = byInstance(hostnames)
   const latestOf = byInstance(latest)
   const liveOf = byInstance(live)
+  const currentOf = byInstance(current)
   return rows.map(({ service, instance }) => {
     const domain = hostnameOf.get(instance.id)
     return {
@@ -94,6 +109,7 @@ async function loadServiceRows(db: Db, where: SQL | undefined, httpsPort: number
       url: domain ? publicUrl(domain.hostname, httpsPort) : null,
       latest: latestOf.get(instance.id) ?? null,
       live: liveOf.get(instance.id) ?? null,
+      current: currentOf.get(instance.id) ?? null,
     }
   })
 }

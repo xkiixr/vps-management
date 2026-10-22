@@ -5,10 +5,13 @@ import {
   CLEANUP_CHANNEL,
   createAppService,
   createProject,
+  createSession,
+  createUser,
   type Deployment,
   DEPLOYMENTS_CHANNEL,
   deployments,
   enqueueDeployment,
+  purgeExpiredSessions,
 } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
 import { startDeployLoop } from '../src/deploy/loop'
@@ -42,6 +45,8 @@ vi.mock('@vpsm/db', async (importOriginal) => {
       }
       return claimed
     },
+    // The real purge unless a test says otherwise (mockReset in beforeEach goes back to it).
+    purgeExpiredSessions: vi.fn(actual.purgeExpiredSessions),
   }
 })
 
@@ -100,6 +105,7 @@ beforeEach(async () => {
   fakeRun(async () => new Promise((r) => setTimeout(r, 50)))
   vi.mocked(sweepOrphans).mockReset()
   fakeSweep(async () => {})
+  vi.mocked(purgeExpiredSessions).mockReset()
 })
 afterEach(async () => {
   controller.abort()
@@ -439,6 +445,99 @@ describe('orphan sweep', () => {
     await expect(started).rejects.toThrow('too many connections')
     expect(listeners.map((l) => [l.channel, l.unlistened])).toEqual([[DEPLOYMENTS_CHANNEL, true]])
     expect(claims.results).toEqual([])
+  })
+})
+
+describe('expired dashboard sessions', () => {
+  const deploymentsListener = () => listeners.find((l) => l.channel === DEPLOYMENTS_CHANNEL)!
+  const cleanupListener = () => listeners.find((l) => l.channel === CLEANUP_CHANNEL)!
+  const settle = () => new Promise((r) => setTimeout(r, 50))
+  const sessionCount = async () => Number((await t.sql`select count(*)::int as n from sessions`)[0]!.n)
+
+  test('are purged every 60 seconds, after the sweep; sessions that have not expired stay', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const user = await createUser(db, { email: 'ada@example.com', name: 'Ada', role: 'admin', password: 'correct horse battery staple' })
+    await createSession(db, user.id)
+    await createSession(db, user.id)
+    await t.sql`update sessions set expires_at = now() - interval '1 second'`
+    await createSession(db, user.id)
+    start()
+    await idle()
+    expect(purgeExpiredSessions).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(60_000)
+
+    await vi.waitFor(() => expect(purgeExpiredSessions).toHaveBeenCalledExactlyOnceWith(db))
+    expect(sweepOrphans).toHaveBeenCalledOnce()
+    await vi.waitFor(async () => expect(await sessionCount()).toBe(1))
+  })
+
+  test('never while a deployment runs: in the same single runner, after it and the sweep', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const release = deferred()
+    fakeRun(async (service) => {
+      if (service === 'web') await release.promise
+    })
+    vi.mocked(purgeExpiredSessions).mockImplementation(() => track('purge', async () => 0))
+    await queue('web')
+    await queue('api')
+    start()
+    await vi.waitFor(() => expect(order).toEqual(['start web']))
+
+    vi.advanceTimersByTime(60_000)
+    await settle()
+    expect(purgeExpiredSessions).not.toHaveBeenCalled()
+
+    release.resolve()
+    await vi.waitFor(() =>
+      expect(order).toEqual([
+        'start web',
+        'end web',
+        'start sweep',
+        'end sweep',
+        'start purge',
+        'end purge',
+        'start api',
+        'end api',
+      ]),
+    )
+    expect(maxConcurrent).toBe(1)
+  })
+
+  test('says how many were purged only when there were some', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.mocked(purgeExpiredSessions).mockResolvedValueOnce(0).mockResolvedValueOnce(3)
+    start()
+    await idle()
+
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(purgeExpiredSessions).toHaveBeenCalledOnce())
+    await settle()
+    expect(log).not.toHaveBeenCalled()
+
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(log).toHaveBeenCalled())
+    expect(log).toHaveBeenCalledExactlyOnceWith('session purge: removed 3 expired dashboard session(s)')
+  })
+
+  test('a failing purge is reported, and the sweep and deployments carry on', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(purgeExpiredSessions).mockRejectedValueOnce(new Error('connection refused'))
+    start()
+    await idle()
+
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(error).toHaveBeenCalledOnce())
+    expect(String(error.mock.calls[0]![0])).toBe('session purge: connection refused')
+    expect(sweepOrphans).toHaveBeenCalledOnce()
+
+    const d = await queue('web')
+    deploymentsListener().notify()
+    await vi.waitFor(() => expect(runDeployment).toHaveBeenCalledWith(d.id, deps))
+
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(purgeExpiredSessions).toHaveBeenCalledTimes(2))
+    expect(sweepOrphans).toHaveBeenCalledTimes(2)
   })
 })
 

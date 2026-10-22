@@ -16,6 +16,12 @@ export type LoginLimiter = {
 
 const DEFAULT_MAX_KEYS = 10_000
 
+// The per-email limiter (key: IP + email) holds more. One address can make up to 50 of its keys per window before
+// the per-IP limiter stops it, and a full limiter refuses every new key, i.e. every sign-in by someone who has not
+// failed lately: at 10 000 keys 200 addresses could lock everyone out, at 100 000 it takes 2 000. Measured cost
+// when full: about 60 MiB with the longest keys login() lets through (IPv6 address and a 320-character email).
+const PER_EMAIL_MAX_KEYS = 100_000
+
 // In-memory and per process (the panel runs one). Each key keeps the times of its most recent failures (at most
 // `max`). At most `maxKeys` keys are held, so a flood of distinct keys costs bounded memory. A key whose failures
 // have all left the window is dropped to make room; a key with a failure still inside the window never is, or
@@ -74,10 +80,11 @@ export type LoginLimits = {
   perIp: LoginLimiter
 }
 
+/** `maxKeys` (for tests) bounds both limiters; by default per-email holds 100 000 keys and per-IP 10 000. */
 export function createLoginLimits(o: { now?: () => number; maxKeys?: number } = {}): LoginLimits {
   return {
-    perEmail: createLoginLimiter({ max: 10, windowMs: LOGIN_WINDOW_MS, ...o }),
-    perIp: createLoginLimiter({ max: 50, windowMs: LOGIN_WINDOW_MS, ...o }),
+    perEmail: createLoginLimiter({ max: 10, windowMs: LOGIN_WINDOW_MS, now: o.now, maxKeys: o.maxKeys ?? PER_EMAIL_MAX_KEYS }),
+    perIp: createLoginLimiter({ max: 50, windowMs: LOGIN_WINDOW_MS, now: o.now, maxKeys: o.maxKeys ?? DEFAULT_MAX_KEYS }),
   }
 }
 

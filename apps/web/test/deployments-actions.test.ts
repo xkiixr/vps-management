@@ -228,7 +228,6 @@ describe('doRestart', () => {
     ['a service never deployed', async (_instanceId: string) => {}],
     ['one whose only deployment failed', async (instanceId: string) => void (await finish(instanceId, 'failed'))],
     ['one whose only deployment failed after building an image', async (instanceId: string) => void (await finish(instanceId, 'failed-with-image'))],
-    ['one whose live deployment crashed', async (instanceId: string) => void (await finish(instanceId, 'crashed'))],
     [
       'one that only has a deployment waiting',
       async (instanceId: string) => void (await enqueueDeployment(t.db, { serviceInstanceId: instanceId, trigger: 'manual' })),
@@ -240,6 +239,42 @@ describe('doRestart', () => {
     expect(await doRestart(t.db, actorOf(ada), 'shop', 'web', SITE)).toEqual({ error: NOTHING_RUNNING })
     expect(await deploymentRows()).toEqual(before)
     expect(await auditRows()).toEqual([])
+  })
+
+  test('a service whose container crashed can be restarted: the crashed deployment is what runs again', async () => {
+    const instance = await shopWithWeb()
+    const crashed = await finish(instance.id, 'crashed')
+    expect(await doRestart(t.db, actorOf(ada), 'shop', 'web', SITE)).toEqual({ notice: 'Restart queued.' })
+
+    const rows = await deploymentRows()
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ id: crashed.id, status: 'CRASHED' })
+    expect(rows[1]).toMatchObject({
+      trigger: 'restart',
+      status: 'QUEUED',
+      created_by_id: ada.id,
+      rollback_of_id: crashed.id,
+      service_instance_id: instance.id,
+    })
+    expect(await auditRows()).toEqual([
+      {
+        actor_id: ada.id,
+        action: 'deployment.restart',
+        target_type: 'deployment',
+        target_id: rows[1]!.id,
+        metadata: { project: 'shop', service: 'web', rollbackOfId: crashed.id },
+      },
+    ])
+  })
+
+  test('a crash that a newer deploy replaced is not restarted: the live one is', async () => {
+    const instance = await shopWithWeb()
+    const crashed = await finish(instance.id, 'crashed')
+    const live = await finish(instance.id, 'live')
+    await doRestart(t.db, actorOf(ada), 'shop', 'web', SITE)
+    const restart = (await deploymentRows()).find((row) => row.trigger === 'restart')
+    expect(restart!.rollback_of_id).toBe(live.id)
+    expect(restart!.rollback_of_id).not.toBe(crashed.id)
   })
 
   test('while a deployment is waiting it is refused with the message of the queue, and that deployment is not touched', async () => {

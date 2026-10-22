@@ -112,6 +112,29 @@ describe('createLoginLimits', () => {
     expect(limits.perIp.check('203.0.113.7')).toBe(true)
     expect(limits.perEmail.check('ip|a@example.com')).toBe(true)
   })
+
+  // One address may make up to 50 per-email keys per window before its own limit stops it; at 10 000 keys, 200
+  // addresses could fill the per-email limiter and lock every new sign-in out (a full limiter refuses new keys).
+  test('the per-email limiter holds 100 000 keys, the per-IP limiter 10 000, and neither evicts a live key', () => {
+    const limits = createLoginLimits()
+    for (let n = 0; n < 100_050; n++) limits.perEmail.fail(`203.0.113.${n % 256}|user-${n}@example.com`)
+    expect(limits.perEmail.size()).toBe(100_000)
+    expect(limits.perEmail.check('203.0.113.0|user-0@example.com')).toBe(true) // known key, one failure
+    expect(limits.perEmail.check('203.0.113.1|user-100049@example.com')).toBe(false) // never got in
+
+    for (let n = 0; n < 10_050; n++) limits.perIp.fail(`198.51.100.${n}`)
+    expect(limits.perIp.size()).toBe(10_000)
+    expect(limits.perIp.check('198.51.100.10049')).toBe(false)
+  })
+
+  test('a maxKeys given for tests bounds both limiters', () => {
+    const limits = createLoginLimits({ maxKeys: 2 })
+    for (const key of ['a', 'b', 'c']) {
+      limits.perEmail.fail(key)
+      limits.perIp.fail(key)
+    }
+    expect([limits.perEmail.size(), limits.perIp.size()]).toEqual([2, 2])
+  })
 })
 
 describe('clientIp', () => {
