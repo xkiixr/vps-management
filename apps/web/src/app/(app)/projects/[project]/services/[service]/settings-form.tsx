@@ -62,7 +62,7 @@ export function SettingsForm({
           placeholder="main"
           defaultValue={shown.branch}
           error={errors.branch}
-          hint="A push to this branch deploys the service."
+          hint="Deploys use this branch. Automatic deploys on push come with the GitHub integration."
         />
         <TextField
           name="rootDirectory"
@@ -117,7 +117,7 @@ export function SettingsForm({
             Save without deploying
           </Button>
           <p className="text-sm text-muted-foreground">
-            The running deployment is left as it is. The next push or deploy will include these settings.
+            The running deployment is left as it is. The next deploy will include these settings.
           </p>
         </div>
       </div>

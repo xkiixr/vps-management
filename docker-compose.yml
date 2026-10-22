@@ -110,6 +110,12 @@ services:
     restart: unless-stopped
     # A minimal init as PID 1 passes the stop signal on and reaps leftover processes.
     init: true
+    # It listens on port 3000 as the non-root user "node" (apps/web/Dockerfile), which needs no capability, and it
+    # never needs to gain one (setuid binaries included).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     mem_limit: 512m
     mem_reservation: 128m
     oom_score_adj: -900

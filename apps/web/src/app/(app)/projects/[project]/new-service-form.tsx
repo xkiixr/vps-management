@@ -46,7 +46,7 @@ export function NewServiceForm({ maxMemoryMb, action }: { maxMemoryMb: number; a
           placeholder="main"
           defaultValue={typed.branch ?? ''}
           error={errors.branch}
-          hint="Empty means main. A push to this branch deploys the service."
+          hint="Empty means main. Deploys use this branch. Automatic deploys on push come with the GitHub integration."
         />
         <TextField
           name="rootDirectory"

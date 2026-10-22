@@ -21,6 +21,11 @@ type Service = {
   oom_score_adj?: number
   restart?: string
   logging?: unknown
+  cap_drop?: string[]
+  cap_add?: string[]
+  security_opt?: string[]
+  privileged?: boolean
+  user?: string
 }
 
 const read = (name: string): { services: Record<string, Service> } =>
@@ -93,6 +98,21 @@ describe('web', () => {
     expect(web.logging).toBe(worker.logging)
     expect(web.logging).toBeDefined()
     expect(web.restart).toBe('unless-stopped')
+  })
+
+  // It listens on port 3000 as a non-root user, which needs no capability at all, and it never needs to gain one.
+  test('runs with every capability dropped and cannot gain privileges', () => {
+    expect(web.cap_drop).toEqual(['ALL'])
+    expect(web.cap_add).toBeUndefined()
+    expect(web.security_opt).toEqual(['no-new-privileges:true'])
+    expect(web.privileged).toBeUndefined()
+  })
+
+  test('the alternate-port override does not loosen it', () => {
+    const webOverride = override.services.web ?? {}
+    for (const key of ['cap_drop', 'cap_add', 'security_opt', 'privileged', 'user'] as const) {
+      expect(webOverride[key]).toBeUndefined()
+    }
   })
 
   test('does not start before the database is healthy and the worker has migrated it', () => {

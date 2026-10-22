@@ -85,7 +85,7 @@ export default async function ServicePage({ params }: Props) {
         <Alert>
           <AlertTitle>Settings changed since the last deploy</AlertTitle>
           <AlertDescription>
-            The running deployment still uses the previous settings. The next push or deploy will use the new ones.
+            The running deployment still uses the previous settings. The next deploy will use the new ones.
           </AlertDescription>
         </Alert>
       )}
