@@ -9,6 +9,7 @@ import {
   validateName,
 } from '@vpsm/core'
 import type { Db } from './client'
+import { ValidationError, violatedUniqueConstraint } from './errors'
 import {
   type Domain,
   domains,
@@ -23,14 +24,9 @@ import {
 } from './schema'
 
 const PRODUCTION_ENVIRONMENT = 'production'
-const UNIQUE_VIOLATION = '23505'
 
-export class ValidationError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ValidationError'
-  }
-}
+// Defined in ./errors so users.ts can share it; re-exported here to keep the package's public API unchanged.
+export { ValidationError }
 
 export type ServiceInstanceDetails = {
   project: Project
@@ -38,15 +34,6 @@ export type ServiceInstanceDetails = {
   service: Service
   instance: ServiceInstance
   domains: Domain[]
-}
-
-// Drizzle wraps the driver error; the postgres.js error (with `code` and `constraint_name`) is on `cause`.
-function violatedUniqueConstraint(error: unknown): string | undefined {
-  for (let e: unknown = error; typeof e === 'object' && e !== null; e = (e as { cause?: unknown }).cause) {
-    const { code, constraint_name } = e as { code?: unknown; constraint_name?: unknown }
-    if (code === UNIQUE_VIOLATION && typeof constraint_name === 'string') return constraint_name
-  }
-  return undefined
 }
 
 // Optional config overrides may carry explicit `undefined` values; those must not erase defaults.

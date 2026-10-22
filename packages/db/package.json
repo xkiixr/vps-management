@@ -8,6 +8,7 @@
     "./testing": "./src/testing.ts"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.2.2",
     "@vpsm/core": "workspace:*",
     "drizzle-orm": "^0.45.4",
     "postgres": "^3.4.9"
