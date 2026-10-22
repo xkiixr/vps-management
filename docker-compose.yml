@@ -9,8 +9,8 @@ x-logging: &logging
 
 # The memory limits of everything together exceed 8 GB by design (see docs/operations.md). When the host
 # runs out, the kernel must kill a user app (oom_score_adj 500) or a build (0) before the control plane, so
-# postgres, traefik and the worker get -900, plus a reservation (cgroup memory.low) the kernel avoids
-# reclaiming from them under pressure.
+# postgres, traefik, the worker and the dashboard get -900, plus a reservation (cgroup memory.low) the kernel
+# avoids reclaiming from them under pressure.
 services:
   postgres:
     image: postgres:18
@@ -32,6 +32,10 @@ services:
     networks:
       - control
 
+  # Do not add forwardedHeaders.insecure or forwardedHeaders.trustedIPs to an entrypoint below. Left at the
+  # default, Traefik discards the X-Forwarded-For a client sends and sets its own, and the dashboard's login
+  # limiter trusts the first entry of that header as the client's address. And the web service must never
+  # publish a port: Traefik is the only way in.
   traefik:
     image: traefik:v3.7
     container_name: vpsm-traefik
@@ -84,8 +88,54 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Healthy once this run of the worker has migrated the database and finished its recovery (it writes the
+    # file then, see apps/worker/src/ready.ts). The web service waits for that.
+    healthcheck:
+      test: ['CMD', 'test', '-f', '/tmp/vpsm-worker-ready']
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
     networks:
       - control
+
+  # The dashboard, at https://PANEL_DOMAIN. The worker writes its Traefik route, so it is reached through Traefik
+  # only: it never publishes a port, and it gets no Docker socket (it talks to the database and nothing else).
+  # It does not start before the worker has migrated the database.
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: vpsm-web
+    restart: unless-stopped
+    # A minimal init as PID 1 passes the stop signal on and reaps leftover processes.
+    init: true
+    mem_limit: 512m
+    mem_reservation: 128m
+    oom_score_adj: -900
+    logging: *logging
+    env_file: .env
+    environment:
+      PANEL_DOMAIN: ${PANEL_DOMAIN:?set PANEL_DOMAIN in .env (for example panel.apps.example.com)}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/login').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # control reaches postgres; edge is where Traefik reaches the dashboard (PANEL_UPSTREAM, http://vpsm-web:3000).
+    networks:
+      - control
+      - edge
 
 networks:
   control:

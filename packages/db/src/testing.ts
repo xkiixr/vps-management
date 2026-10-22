@@ -28,6 +28,8 @@ async function withAdmin<T>(adminUrl: string, fn: (admin: postgres.Sql) => Promi
 export async function setupTestDb(): Promise<{
   db: Db
   sql: Sql
+  /** Connection string of the new database, for another process (such as a dashboard under test). It holds the credentials of TEST_DATABASE_URL. */
+  url: string
   reset(): Promise<void>
   close(): Promise<void>
 }> {
@@ -52,6 +54,7 @@ export async function setupTestDb(): Promise<{
   return {
     db,
     sql,
+    url: url.href,
     reset: async () => {
       await sql.unsafe(truncateAll)
     },

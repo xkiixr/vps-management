@@ -43,3 +43,19 @@ test('close() drops the database it created', async () => {
 
   expect(await databaseExists(name)).toBe(false)
 })
+
+// A second process (the e2e smoke test starts the dashboard against it) connects with this.
+test('url connects to the database that was created', async () => {
+  const t = await setupTestDb()
+  try {
+    const other = postgres(t.url, { max: 1, onnotice: () => {} })
+    try {
+      const rows = await other`select current_database() as name`
+      expect(rows[0]!.name).toBe(await currentDatabase(t))
+    } finally {
+      await other.end()
+    }
+  } finally {
+    await t.close()
+  }
+})

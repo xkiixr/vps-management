@@ -38,3 +38,9 @@ services:
     environment:
       TLS_MODE: dns-wildcard
       PUBLIC_HTTPS_PORT: ${TRAEFIK_HTTPS_PORT:-8443}
+
+  # The dashboard builds its own address (https://PANEL_DOMAIN:PORT), which the browser's Origin header is
+  # compared with, from the same port Traefik listens on.
+  web:
+    environment:
+      PUBLIC_HTTPS_PORT: ${TRAEFIK_HTTPS_PORT:-8443}

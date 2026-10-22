@@ -1,26 +1,28 @@
 # คู่มือติดตั้งและดูแลระบบ
 
-คู่มือนี้ใช้กับแผน 1 (deploy engine): ระบบรันบน VPS เครื่องเดียวด้วย `docker compose` และสั่งงานผ่าน CLI ของ worker (ยังไม่มี dashboard)
+คู่มือนี้ใช้กับแผน 1 (deploy engine) และแผน 2 (web dashboard): ระบบรันบน VPS เครื่องเดียวด้วย `docker compose` สั่งงานผ่านหน้าเว็บ (หัวข้อ "Dashboard") หรือผ่าน CLI ของ worker
 
 ## ภาพรวม
 
 | Service | Image | หน้าที่ |
 | --- | --- | --- |
 | `postgres` | `postgres:18` | ฐานข้อมูลของระบบ และใช้ตาราง `deployments` เป็นคิวงาน (ไม่เปิด port ออกนอก network `vpsm-control`) |
-| `traefik` | `traefik:v3.7` | รับ HTTP/HTTPS (port 80 และ 443) ออกใบรับรอง Let's Encrypt และส่งต่อไปยังแอป โดยอ่าน route จากไฟล์ที่ worker เขียน (ปิด API และ dashboard) |
-| `worker` | build จาก `apps/worker/Dockerfile` | เดียวที่ถือ Docker socket: ดึงโค้ดจาก GitHub, build ด้วย Railpack, รัน container, healthcheck, สลับ route แบบไม่ล่ม และรับคำสั่งจาก CLI |
+| `traefik` | `traefik:v3.7` | รับ HTTP/HTTPS (port 80 และ 443) ออกใบรับรอง Let's Encrypt และส่งต่อไปยังแอป โดยอ่าน route จากไฟล์ที่ worker เขียน (ปิด API และ dashboard ของ Traefik เอง) |
+| `worker` | build จาก `apps/worker/Dockerfile` | เดียวที่ถือ Docker socket: ดึงโค้ดจาก GitHub, build ด้วย Railpack, รัน container, healthcheck, สลับ route แบบไม่ล่ม และรับคำสั่งจาก CLI รัน migration ของฐานข้อมูลตอนเริ่ม และเป็น `healthy` เมื่อ migrate กับกู้งานค้างเสร็จแล้ว |
+| `web` | build จาก `apps/web/Dockerfile` | หน้าเว็บจัดการ (Next.js) ที่ `https://<PANEL_DOMAIN>` ไม่ถือ Docker socket ไม่เปิด port เข้าได้ทาง Traefik เท่านั้น (worker เขียน route ให้) และเริ่มหลังจาก worker `healthy` เท่านั้น |
 
-ข้อมูลเก็บใน named volume: `vpsm-pgdata` (ฐานข้อมูล), `vpsm-acme` (ใบรับรอง), `vpsm-traefik-dynamic` (route ของ Traefik), `vpsm-work` (โค้ดที่กำลัง build ชั่วคราว) และ network `vpsm-control` (postgres + worker), `vpsm-edge` (Traefik)
+ข้อมูลเก็บใน named volume: `vpsm-pgdata` (ฐานข้อมูล), `vpsm-acme` (ใบรับรอง), `vpsm-traefik-dynamic` (route ของ Traefik), `vpsm-work` (โค้ดที่กำลัง build ชั่วคราว) และ network `vpsm-control` (postgres + worker + web), `vpsm-edge` (Traefik + web)
 
 ## ข้อควรระวังด้านความปลอดภัย
 
 - **worker มีสิทธิ์เทียบเท่า root บนเครื่อง VPS** เพราะถือ Docker socket (`/var/run/docker.sock`) ใครสั่งงาน worker ได้ก็ควบคุมทั้งเครื่องได้ และ worker รันเป็น root ใน container ของตัวเอง
 - **worker ต้องไม่เปิด port ใดๆ เด็ดขาด** ห้ามเพิ่ม `ports:` ให้ service `worker` ใน `docker-compose.yml` และห้าม mount Docker socket ให้ service อื่นหรือ container ของผู้ใช้
+- **`web` ต้องไม่เปิด port และไม่มี Docker socket** เข้าได้ทาง Traefik เท่านั้น (ดูหัวข้อ "Dashboard" เรื่อง panel ที่เป็น same-site กับแอปของทีม) และห้ามเพิ่ม `forwardedHeaders.insecure` หรือ `forwardedHeaders.trustedIPs` ให้ Traefik เพราะตัวจำกัดการล็อกอินของ panel เชื่อ `X-Forwarded-For` รายการแรกที่ Traefik ตั้งให้
 - การควบคุมระบบในแผนนี้ทำผ่าน `sudo docker compose exec worker …` เท่านั้น ดังนั้นคนที่ใช้ `docker` บน VPS ได้ (กลุ่ม `docker` หรือ root) คือผู้ดูแลระบบทั้งหมด
 - คำสั่ง `docker` ทุกคำสั่งในคู่มือนี้ (หลังรันสคริปต์ติดตั้ง) ขึ้นต้นด้วย `sudo` เพราะสคริปต์ไม่ได้เพิ่มผู้ใช้เข้ากลุ่ม `docker` และไม่แนะนำให้เพิ่ม: สมาชิกกลุ่ม `docker` ได้สิทธิ์เทียบเท่า root โดยไม่ต้องใส่รหัสผ่าน การใช้ `sudo` ทำให้ทุกคำสั่งต้องยืนยันตัวตนและถูกบันทึกไว้
 - ไฟล์ `.env` เก็บรหัสผ่านฐานข้อมูลและ `GITHUB_TOKEN` ห้าม commit (อยู่ใน `.gitignore` แล้ว) และควรสั่ง `chmod 600 .env`
 - `GITHUB_TOKEN` ให้ใช้ fine-grained token ที่อ่านอย่างเดียว (Contents: Read-only) และเลือกเฉพาะ repo ที่จะ deploy
-- Traefik ไม่ได้เปิด API/dashboard ดังนั้นไม่มีหน้าเว็บบริหารที่ต้องป้องกัน
+- Traefik ไม่ได้เปิด API/dashboard ของตัวเอง หน้าเว็บบริหารมีหน้าเดียวคือ panel ของระบบนี้ (หัวข้อ "Dashboard") ซึ่งต้องล็อกอินก่อนใช้งานทุกหน้า
 - port ที่ Docker เปิด (`ports:`) ผ่านกฎ iptables ของ Docker และ **ไม่ถูก ufw กรอง** ในแผนนี้ compose เปิดแค่ 80 และ 443 จึงปลอดภัย แต่ถ้าเพิ่ม `ports:` ให้ service ใดต้องรู้ข้อนี้ไว้
 
 ## สิ่งที่ต้องมี
@@ -38,10 +40,10 @@
 | --- | --- |
 | แอปของผู้ใช้รวมกัน (`MEMORY_BUDGET_MB`) | 5632 MB |
 | builder `vpsm-builder` (ใช้เฉพาะตอน build) | 3072 MB |
-| control plane: postgres 512 + traefik 256 + worker 768 | 1536 MB |
-| **รวม** | **10240 MB (ประมาณ 10 GB)** |
+| control plane: postgres 512 + traefik 256 + worker 768 + web 512 | 2048 MB |
+| **รวม** | **10752 MB (ประมาณ 10.5 GB)** |
 
-ตั้งใจให้เป็นแบบนี้ (แอปส่วนใหญ่ใช้ไม่เต็มเพดาน และ build เกิดเป็นครั้งคราว) แต่ถ้าทุกส่วนใช้ memory พร้อมกันจนเครื่องหมด kernel จะ kill process (OOM killer) และ **ออกแบบให้ kill แอปของผู้ใช้และงาน build ก่อนเสมอ**: container ของแอปตั้ง `oom_score_adj` เป็น 500 ส่วน postgres, traefik และ worker ตั้ง -900 พร้อม `mem_reservation` (ใน `docker-compose.yml`) ฐานข้อมูล, Traefik และ worker จึงรอด แต่แอปบางตัวอาจถูก kill (Docker restart ให้ตาม restart policy) หรือ build อาจล้มเหลว
+ตั้งใจให้เป็นแบบนี้ (แอปส่วนใหญ่ใช้ไม่เต็มเพดาน และ build เกิดเป็นครั้งคราว) แต่ถ้าทุกส่วนใช้ memory พร้อมกันจนเครื่องหมด kernel จะ kill process (OOM killer) และ **ออกแบบให้ kill แอปของผู้ใช้และงาน build ก่อนเสมอ**: container ของแอปตั้ง `oom_score_adj` เป็น 500 ส่วน postgres, traefik, worker และ web ตั้ง -900 พร้อม `mem_reservation` (ใน `docker-compose.yml`) ฐานข้อมูล, Traefik, worker และ web จึงรอด แต่แอปบางตัวอาจถูก kill (Docker restart ให้ตาม restart policy) หรือ build อาจล้มเหลว
 
 ควรทำอย่างใดอย่างหนึ่งก่อนใช้งานจริง:
 
@@ -55,7 +57,7 @@
   swapon --show
   ```
   container ของแอปไม่ใช้ swap (ตั้ง memory swap เท่ากับ memory) แต่ส่วนอื่นของเครื่องใช้ได้ kernel จึงไม่ต้อง kill เร็วเกินไป
-- **หรือลด `MEMORY_BUDGET_MB`** ใน `.env` เช่น `3072` (รวมเป็น 3072 + 3072 + 1536 = 7680 MB) แลกกับการรันแอปได้น้อยลง
+- **หรือลด `MEMORY_BUDGET_MB`** ใน `.env` เช่น `3072` (รวมเป็น 3072 + 3072 + 2048 = 8192 MB) แลกกับการรันแอปได้น้อยลง
 
 ## 1. ตั้งค่า DNS
 
@@ -100,11 +102,12 @@ nano .env
 | `DATABASE_URL` | ปล่อยตามตัวอย่าง (ใช้ `${POSTGRES_PASSWORD}`) |
 | `APPS_DOMAIN` | โดเมนของแอป เช่น `apps.example.com` (ตัวพิมพ์เล็ก) |
 | `ACME_EMAIL` | อีเมลสำหรับ Let's Encrypt **ต้องตั้ง** |
+| `PANEL_DOMAIN` | ชื่อโดเมนของหน้าเว็บจัดการ เช่น `panel.apps.example.com` (ใต้ `APPS_DOMAIN` ระดับเดียว) **ต้องตั้ง** ดูหัวข้อ "Dashboard" |
 | `MEMORY_BUDGET_MB` | งบ RAM รวมของแอปผู้ใช้ (ค่าเริ่มต้น 5632 = 8192 − 2560) เกินงบแล้วปฏิเสธการ deploy ทันที (ดูหัวข้อ "หน่วยความจำและ swap") |
 | `MAX_SERVICE_MEMORY_MB` | memory สูงสุดต่อ service (ค่าเริ่มต้น 2048) |
 | `GITHUB_TOKEN` | fine-grained token อ่านอย่างเดียว ใช้ clone repo (เว้นว่างได้ถ้า repo เป็น public) ใช้จนกว่าจะมี GitHub App ในแผน 3 |
 
-ถ้าไม่ตั้ง `POSTGRES_PASSWORD` หรือ `ACME_EMAIL` คำสั่ง `docker compose` จะหยุดพร้อมข้อความบอกตัวแปรที่ขาด
+ถ้าไม่ตั้ง `POSTGRES_PASSWORD`, `ACME_EMAIL` หรือ `PANEL_DOMAIN` คำสั่ง `docker compose` จะหยุดพร้อมข้อความบอกตัวแปรที่ขาด
 
 ## 4. เริ่มระบบ
 
@@ -114,7 +117,7 @@ sudo docker compose ps
 sudo docker compose logs worker
 ```
 
-ผลที่ถูกต้อง: `postgres` เป็น `healthy`, `traefik` และ `worker` เป็น `running`; log ของ worker มี `buildx: vpsm-builder`, `recovery: 0 interrupted deployment(s) …` และ `worker started` โดยไม่มีบรรทัด error (การ migrate ฐานข้อมูลทำเองตอน worker เริ่ม)
+ผลที่ถูกต้อง: `postgres` เป็น `healthy`, `traefik` เป็น `running`, `worker` เป็น `healthy` (หลัง migrate และกู้งานค้างเสร็จ) และ `web` เป็น `healthy`; log ของ worker มี `buildx: vpsm-builder`, `recovery: 0 interrupted deployment(s) …` และ `worker started` โดยไม่มีบรรทัด error (การ migrate ฐานข้อมูลทำเองตอน worker เริ่ม) `web` จะไม่เริ่มจนกว่า `worker` จะ `healthy` การ build image ของ `web` ครั้งแรกใช้เวลาหลายนาทีและใช้ RAM ชั่วคราวระหว่าง `next build` จึงควรทำตอนไม่มี deployment กำลัง build
 
 worker ลงทะเบียน builder `vpsm-builder` (จำกัด memory 3 GB และ CPU 3 core) **ตอนเริ่มทำงาน** ไม่ใช่ตอน build ครั้งแรก บรรทัด `buildx: vpsm-builder` คือผลของการลงทะเบียนนี้ และจะปรากฏอีกทุกครั้งที่ container ของ worker ถูกสร้างใหม่ (ตรวจได้ด้วย `sudo docker compose exec worker docker buildx ls`) ส่วน container ของ BuildKit จะเริ่มจริงตอน build ครั้งแรก
 
@@ -183,11 +186,15 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
 
 | อาการ | วิธีตรวจ |
 | --- | --- |
-| `docker compose` ฟ้องตัวแปรขาด | ตรวจ `.env` ว่าตั้ง `POSTGRES_PASSWORD` และ `ACME_EMAIL` แล้ว |
+| `docker compose` ฟ้องตัวแปรขาด | ตรวจ `.env` ว่าตั้ง `POSTGRES_PASSWORD`, `ACME_EMAIL` และ `PANEL_DOMAIN` แล้ว |
 | worker ปิดตัวแล้วเริ่มใหม่วนซ้ำ | `sudo docker compose logs worker` บรรทัด `worker: …` บอกสาเหตุ มักเป็น `APPS_DOMAIN` ไม่ถูกต้อง หรือเชื่อมฐานข้อมูลไม่ได้ |
 | deployment เป็น `FAILED` | `logs <deploymentId>` (id อยู่ในบรรทัด `queued deployment <id>`); เหตุผลของ deployment ที่ถูกขัดจังหวะดูได้จาก `sudo docker compose exec postgres psql -U postgres -c "select status, failure_reason from deployments order by created_at desc limit 5"` |
 | HTTPS ได้ใบรับรองผิด/ขึ้นเตือน | `sudo docker compose logs traefik` ตรวจ DNS ว่าชี้ถูก และ port 80 เข้าถึงได้จากภายนอก (โหมด port อื่นตามหัวข้อท้ายคู่มือไม่ใช้ port 80: ให้เปิด URL ที่มี `:8443`, ตรวจ `.duckdns.env` และดู log ของ traefik แทน) |
 | แอปถูก restart เอง / build ล้มเหลวเพราะ memory หมด | `sudo dmesg \| grep -i 'killed process'` ถ้ามีบรรทัดของแอปหรือ BuildKit แปลว่าเครื่อง memory ไม่พอ (ดูหัวข้อ "หน่วยความจำและ swap") |
+| panel (`https://panel.<APPS_DOMAIN>`) ขึ้น `404` หรือ `502` | `404` แปลว่า Traefik ไม่มี route ของชื่อนี้: ตรวจว่า `PANEL_DOMAIN` ใน `.env` ตรงกับชื่อที่เปิด (โหมด port อื่นต้องมี `:8443`) และ `sudo docker compose logs worker` ไม่มีบรรทัดเกี่ยวกับ route `panel` ที่ไม่ผ่านการตรวจ (เช่น ชื่อไม่ถูกต้อง) `502` แปลว่ามี route แต่ติดต่อ `web` ไม่ได้: `sudo docker compose ps web` ต้องเป็น `running (healthy)` และดู `sudo docker compose logs web` |
+| panel เปิดได้แต่ล็อกอินหรือกดปุ่มแล้วขึ้น error `cross-origin request refused` | ต้องเปิดที่ `https://<PANEL_DOMAIN>` (บวก `:8443` ในโหมด port อื่น) ตรงตัวอักษร ไม่ใช่ผ่าน IP หรือชื่ออื่น เพราะทุก action ตรวจ header `Origin` กับชื่อนี้ |
+| `docker compose up` รอ `worker` แล้วฟ้อง `unhealthy` ทำให้ `web` ไม่เริ่ม | worker ยังไม่ migrate/กู้งานค้างเสร็จ ดู `sudo docker compose logs worker` บรรทัด `worker: …` (มักเป็น `APPS_DOMAIN` หรือ `PANEL_DOMAIN` ไม่ถูกต้อง: ในโหมด port อื่น `PANEL_DOMAIN` ต้องเป็น `panel.<APPS_DOMAIN>` ระดับเดียว) แก้แล้วสั่ง `sudo docker compose up -d` ใหม่ |
+| ลืมรหัสผ่านของ admin | `sudo docker compose exec worker node dist/cli.js user:reset-password <อีเมล>` (พิมพ์รหัสใหม่ครั้งเดียว) |
 | ดู container ของแอปที่ระบบจัดการ | `sudo docker ps --filter label=vpsm.managed=true` |
 | ดูเพดาน memory ของ builder | `sudo docker inspect buildx_buildkit_vpsm-builder0 --format '{{.HostConfig.Memory}}'` ต้องได้ `3221225472` (3 GB; container ของ BuildKit เริ่มตอน build ครั้งแรก จึงตรวจได้หลัง deploy ครั้งแรกเท่านั้น) |
 | `docker compose up -d` ฟ้อง `port is already allocated` หรือ `address already in use` ที่ port 80/443 | Traefik ยังพยายามเปิด port 80/443 แปลว่าไฟล์ override `docker-compose.dns-tls.yml` ไม่ได้ถูกใช้ ตรวจว่า `COMPOSE_FILE=docker-compose.yml:docker-compose.dns-tls.yml` อยู่ใน `.env` โดยไม่มี `#` นำหน้า และ `docker compose version` ต้องเป็น 2.24.0 ขึ้นไป (ดูหัวข้อ "เมื่อ port 80/443 ถูกใช้อยู่แล้ว") |
@@ -198,7 +205,7 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
 
 ถ้าใช้โหมด port อื่น (หัวข้อท้ายคู่มือ) ให้ใส่ `:8443` ท้ายทุก URL ที่ใช้ `curl` ในรายการนี้
 
-1. **ติดตั้ง:** `sudo docker compose ps` แสดง postgres (healthy), traefik, worker เป็น running และ `sudo docker compose logs worker` ไม่มี error
+1. **ติดตั้ง:** `sudo docker compose ps` แสดง postgres (healthy), traefik เป็น running, worker และ web เป็น healthy และ `sudo docker compose logs worker` ไม่มี error
 2. **deploy แอปตัวอย่าง:** ทำตามหัวข้อ 6 แล้ว `status demo` ต้องเป็น `SUCCESS`, `curl` ต้องได้ `hello from vpsm` ผ่าน HTTPS และ memory ของ builder ต้องเป็น `3221225472`
 3. **deploy แบบไม่ล่ม:** เปิด terminal ที่ 1 ยิงต่อเนื่อง
    ```bash
@@ -210,6 +217,65 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
    sudo docker compose kill worker && sudo docker compose up -d worker
    ```
    deployment นั้นต้องเป็น `FAILED` (`worker restarted during deployment`), เว็บยังตอบ `200` และ `sudo docker ps --filter label=vpsm.managed=true` เหลือ container ของ hello เพียงตัวเดียว ขั้นนี้ต้องใช้ `kill` ไม่ใช่ `restart` หรือ `stop` เพราะสองคำสั่งนั้นส่ง SIGTERM และ worker จะรอให้ deployment ที่กำลังทำอยู่ทำเสร็จก่อนได้นานสุด 50 วินาที deploy สั้นๆ จึงจบเป็น `SUCCESS` ได้ตามปกติ ซึ่งไม่ได้แปลว่าการกู้งานค้างเสีย
+
+## Dashboard
+
+หน้าเว็บจัดการอยู่ที่ `https://panel.<APPS_DOMAIN>` (โหมด port อื่นคือ `https://panel.<APPS_DOMAIN>:8443`) ไม่มีหน้าสมัครสมาชิก: admin สร้างบัญชีให้ทีมจากหน้า Admin ของเว็บ ส่วนบัญชีแรกสร้างด้วย CLI (ด้านล่าง) ผู้ใช้มีสองบทบาท `admin` (จัดการผู้ใช้ ตั้งค่าระบบ เห็นทุก project) และ `member` (เห็นเฉพาะ project ที่เป็นสมาชิก)
+
+### ตั้งค่า `PANEL_DOMAIN`
+
+- ตั้ง `PANEL_DOMAIN` ใน `.env` เป็น `panel.<APPS_DOMAIN>` เช่น `panel.apps.example.com` สำหรับ VPS นี้คือ `panel.itexcellence.duckdns.org` (DNS แบบ wildcard `*.<APPS_DOMAIN>` ของหัวข้อ 1 ครอบคลุมชื่อนี้อยู่แล้ว)
+- **ถ้าใช้โหมด port อื่น (ใบรับรอง wildcard) `PANEL_DOMAIN` ต้องเป็นชื่อระดับเดียวใต้ `APPS_DOMAIN` เท่านั้น** (`panel.<APPS_DOMAIN>`) เพราะใบรับรองครอบคลุมแค่ `*.<APPS_DOMAIN>` ชื่ออื่นจะได้ใบรับรองของชื่ออื่น worker จึงไม่ยอมเริ่มทำงานถ้าตั้งไม่ตรง และบอกในข้อความ error ว่า `PANEL_DOMAIN` ต้องเป็นชื่อระดับเดียวใต้ `APPS_DOMAIN`
+- ชื่อนี้ถูกสงวนไว้ให้ panel แอปใดๆ ใช้ไม่ได้ ถ้าไม่ตั้ง `PANEL_DOMAIN` คำสั่ง `docker compose` จะหยุดพร้อมข้อความบอกตัวแปรที่ขาด
+
+### เปิดใช้บนระบบที่ติดตั้งอยู่แล้ว (สลับครั้งแรก)
+
+1. ตรวจว่า DNS ชี้มาที่ VPS: `dig +short panel.<APPS_DOMAIN>` ต้องได้ IP ของ VPS
+2. เพิ่ม `PANEL_DOMAIN=panel.<APPS_DOMAIN>` ใน `.env` (สำหรับ VPS นี้ `PANEL_DOMAIN=panel.itexcellence.duckdns.org`)
+3. ดึงโค้ดและสร้างใหม่ (ต้องมี `--build` เสมอ เพราะต้อง build image ของ worker ที่รู้จัก panel และ image ของ `web`):
+
+   ```bash
+   cd vps-management
+   git pull && sudo docker compose up -d --build
+   ```
+
+   แอปของผู้ใช้เป็น container แยก จึงยังรันต่อระหว่างนี้ worker ถูกสร้างใหม่ (หัวข้อ 7 อธิบายกรณีมี deployment ค้าง)
+4. รอจน worker เป็น `healthy` แล้ว `web` ก็เริ่มและเป็น `healthy`:
+
+   ```bash
+   sudo docker compose ps
+   sudo docker compose logs worker
+   ```
+
+   worker เขียน route ของ panel ให้ Traefik ตอนเริ่มทำงาน
+5. สร้าง admin คนแรก รหัสผ่านที่สร้างให้ **แสดงครั้งเดียว** คัดลอกเก็บไว้ทันที:
+
+   ```bash
+   sudo docker compose exec worker node dist/cli.js user:create you@example.com --name "Your Name" --admin
+   ```
+
+6. เปิด `https://panel.<APPS_DOMAIN>` (โหมด port อื่น `https://panel.<APPS_DOMAIN>:8443`) ล็อกอินด้วยอีเมลกับรหัสผ่านข้างต้น แล้ว **เปลี่ยนรหัสผ่านที่หน้า Account ทันที**
+
+ใบรับรองของ panel ออกครั้งแรกที่ route ถูกโหลดเข้า Traefik (โหมดปกติขอทีละชื่อด้วย HTTP challenge โหมด port อื่นใช้ใบ wildcard ใบเดียวที่มีอยู่แล้ว) ช่วงแรก browser อาจเห็นใบรับรองเริ่มต้นของ Traefik ให้รอสักครู่แล้วเปิดใหม่ ผู้ใช้อื่นสร้างได้จากเมนู Admin ในเว็บ (รหัสผ่านที่สร้างให้แสดงครั้งเดียวเช่นกัน)
+
+### ข้อควรระวัง: panel เป็น same-site กับแอปของทีม
+
+`panel.<APPS_DOMAIN>` กับแอป `<service>-<project>.<APPS_DOMAIN>` อยู่ใต้โดเมนเดียวกัน browser จึงนับว่าเป็น **same-site** หน้าเว็บของแอปที่ deploy ไว้ส่งคำขอไปที่ panel ในนามผู้ใช้ที่ล็อกอินอยู่ได้ และ `SameSite` ของ cookie ช่วยไม่ได้ในกรณีนี้ ระบบจึงป้องกันไว้ดังนี้ (อย่าปิดหรือเลี่ยง):
+
+- cookie ของ session ชื่อ `__Host-vpsm_session` เป็น `HttpOnly`, `Secure`, `Path=/` และไม่มี `Domain` แอปบน subdomain อื่นอ่านหรือเขียนทับไม่ได้
+- ทุกการแก้ข้อมูล (server action) ตรวจ header `Origin` ให้ตรงกับ `https://<PANEL_DOMAIN>` แบบเป๊ะ ไม่ตรงหรือไม่มีจะปฏิเสธ
+- ล็อกอินผิดเกิน 10 ครั้งใน 15 นาทีจาก IP และอีเมลเดียวกันจะถูกปฏิเสธชั่วคราว (ตัวจำกัดนี้เชื่อ `X-Forwarded-For` รายการแรกที่ Traefik ตั้ง จึงห้ามตั้ง `forwardedHeaders` ให้ Traefik)
+
+ถึงอย่างนั้นก็ควร deploy เฉพาะโค้ดของทีมที่เชื่อถือได้ เพราะโค้ดที่รันบน subdomain เดียวกันกับ panel เป็นด่านที่อ่อนที่สุดของระบบนี้
+
+### คำสั่งที่ใช้บ่อย
+
+```bash
+sudo docker compose ps web                  # ต้องเป็น running (healthy)
+sudo docker compose logs -f web             # log ของหน้าเว็บ
+sudo docker compose exec worker node dist/cli.js user:list
+sudo docker compose exec worker node dist/cli.js user:reset-password you@example.com
+```
 
 ## เมื่อ port 80/443 ถูกใช้อยู่แล้ว (เช่น Nginx Proxy Manager)
 
@@ -225,9 +291,9 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
 
 ### สิ่งที่ต่างจากโหมดปกติ
 
-- **ทุก URL แบบ `https://` ในคู่มือนี้ต้องใส่ `:8443` ท้ายชื่อโดเมน** รวมถึงคำสั่ง `curl` ในหัวข้อ 6 และรายการตรวจในหัวข้อ 10 เช่น `curl -s https://hello-demo.itexcellence.duckdns.org:8443/` (คำสั่ง `service:create`, `status` และ log ของ deployment พิมพ์ URL ที่มี `:8443` ให้เอง)
+- **ทุก URL แบบ `https://` ในคู่มือนี้ต้องใส่ `:8443` ท้ายชื่อโดเมน** รวมถึง panel (`https://panel.itexcellence.duckdns.org:8443`) คำสั่ง `curl` ในหัวข้อ 6 และรายการตรวจในหัวข้อ 10 เช่น `curl -s https://hello-demo.itexcellence.duckdns.org:8443/` (คำสั่ง `service:create`, `status` และ log ของ deployment พิมพ์ URL ที่มี `:8443` ให้เอง)
 - Traefik ไม่มี HTTP entrypoint จึงเปิด `http://…:8443` ไม่ได้ (ได้ `400`) และไม่มีการ redirect จาก port 80 มาที่ HTTPS
-- ใบรับรอง wildcard ครอบคลุมเฉพาะชื่อ `*.<APPS_DOMAIN>` ที่ระบบสร้างให้แอป โดเมนอื่นที่เพิ่มเองยังไม่รองรับในโหมดนี้
+- ใบรับรอง wildcard ครอบคลุมเฉพาะชื่อ `*.<APPS_DOMAIN>` ที่ระบบสร้างให้แอป และ `panel.<APPS_DOMAIN>` ของ panel (`PANEL_DOMAIN` ต้องเป็นชื่อระดับเดียวใต้ `APPS_DOMAIN` ตามหัวข้อ "Dashboard") โดเมนอื่นที่เพิ่มเองยังไม่รองรับในโหมดนี้
 - ไม่ว่าจะมีกี่แอปก็ขอใบรับรองแค่ใบเดียว จึงไม่ติดเพดานการออกใบรับรองของ Let's Encrypt ที่เกิดจากการขอทีละชื่อแบบโหมดปกติ
 
 ### ขั้นตอนบน VPS

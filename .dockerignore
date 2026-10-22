@@ -2,10 +2,14 @@
 .worktrees
 .superpowers
 **/node_modules
+**/.next
 **/dist
 **/.env
 **/.env.*
-**/.duckdns.env
 !.env.example
+.duckdns.env
+**/.duckdns.env
+**/test-results
+**/playwright-report
 docs
 examples
