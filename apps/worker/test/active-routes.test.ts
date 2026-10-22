@@ -192,17 +192,17 @@ test('regenerateRoutes writes the routes of live deployments to routes.yml', asy
   }
 })
 
-test("regenerateRoutes passes the tls option on: 'default' renders routers without a certificate resolver", async () => {
+test("regenerateRoutes passes the tls option on: 'entrypoint' renders routers without a tls section", async () => {
   const dir = await mkdtemp(join(tmpdir(), 'vpsm-regen-'))
   try {
     const si1 = await addService('web')
     await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
 
-    await regenerateRoutes(db, dir, undefined, 'default')
+    await regenerateRoutes(db, dir, undefined, 'entrypoint')
 
     const yaml = await readFile(join(dir, 'routes.yml'), 'utf8')
     expect(yaml).toContain(`    r-${si1}:\n      rule: Host(\`web-shop.apps.example.com\`)\n`)
-    expect(yaml).toContain('      tls: {}\n')
+    expect(yaml).not.toContain('tls')
     expect(yaml).not.toContain('certResolver')
 
     await regenerateRoutes(db, dir, undefined, 'resolver')

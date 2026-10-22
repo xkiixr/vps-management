@@ -19,7 +19,8 @@ services:
     environment:
       DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:?DUCKDNS_TOKEN is required}
     # No web entrypoint (nothing listens on 80) and no HTTP challenge. The websecure entrypoint asks for
-    # the wildcard certificate itself; the routers written by the worker (TLS_MODE=dns-wildcard) just use it.
+    # the wildcard certificate itself; the routers written by the worker (TLS_MODE=dns-wildcard) have no
+    # tls section of their own, which is what makes them inherit the entrypoint's resolver and domains.
     command: !override
       - --providers.file.directory=/traefik/dynamic
       - --providers.file.watch=true

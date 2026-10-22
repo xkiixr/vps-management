@@ -45,9 +45,9 @@ async function main(): Promise<void> {
     railpackPrepare,
     buildImage,
     waitHealthy,
-    // In dns-wildcard mode the entrypoint holds the one wildcard certificate and the routers just use it.
+    // In dns-wildcard mode the entrypoint requests the one wildcard certificate; routers inherit it by having no tls section.
     regenerateRoutes: () =>
-      regenerateRoutes(db, config.traefikDynamicDir, undefined, config.tlsMode === 'dns-wildcard' ? 'default' : 'resolver'),
+      regenerateRoutes(db, config.traefikDynamicDir, undefined, config.tlsMode === 'dns-wildcard' ? 'entrypoint' : 'resolver'),
     cleanupImages: async (serviceInstanceId) => {
       const removed = await cleanupImages({ db, docker, config }, serviceInstanceId)
       if (removed.length > 0) console.log(`removed ${removed.length} old image(s): ${removed.join(', ')}`)

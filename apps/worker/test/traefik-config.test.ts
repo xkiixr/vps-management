@@ -34,15 +34,16 @@ test("the 'resolver' option renders what the default renders", () => {
   expect(renderRoutesYaml(routes, {})).toBe(renderRoutesYaml(routes))
 })
 
-// The wildcard certificate is requested once on the entrypoint; routers only have to enable TLS.
-test("the 'default' option renders routers that use the default certificate store", () => {
+// The wildcard certificate is requested once, by the entrypoint's tls defaults (certresolver + domains).
+// Traefik applies those defaults only to routers without a tls section, so the routers must not have one.
+test("the 'entrypoint' option renders routers without a tls section", () => {
   expect(
     renderRoutesYaml(
       [
         { serviceInstanceId: 'si1', hostnames: ['web-shop.apps.example.com'], upstreamUrl: 'http://vpsm-web-12345678:8080' },
         { serviceInstanceId: 'si2', hostnames: ['b.example.com', 'a.example.com'], upstreamUrl: 'http://vpsm-api-87654321:3000' },
       ],
-      { tls: 'default' },
+      { tls: 'entrypoint' },
     ),
   ).toBe(
     `http:
@@ -52,13 +53,11 @@ test("the 'default' option renders routers that use the default certificate stor
       entryPoints:
         - websecure
       service: s-si1
-      tls: {}
     r-si2:
       rule: Host(\`a.example.com\`) || Host(\`b.example.com\`)
       entryPoints:
         - websecure
       service: s-si2
-      tls: {}
   services:
     s-si1:
       loadBalancer:
@@ -72,14 +71,27 @@ test("the 'default' option renders routers that use the default certificate stor
   )
 })
 
+test("the 'entrypoint' output never mentions tls or a certificate resolver", () => {
+  const routes = [
+    { serviceInstanceId: 'si1', hostnames: ['a.example.com'], upstreamUrl: 'http://one:1' },
+    { serviceInstanceId: 'si2', hostnames: ['b.example.com', 'c.example.com'], upstreamUrl: 'http://two:2' },
+    { serviceInstanceId: 'si3', hostnames: ['d.example.com'], upstreamUrl: 'http://three:3' },
+  ]
+  const yaml = renderRoutesYaml(routes, { tls: 'entrypoint' })
+  expect(yaml).not.toContain('tls')
+  expect(yaml).not.toContain('certResolver')
+  expect(yaml.match(/^ {4}r-si\d:$/gm)).toHaveLength(3)
+  expect(renderRoutesYaml(routes, { tls: 'resolver' }).match(/tls:/g)).toHaveLength(3)
+})
+
 test("no routes is a comment-only file in either tls mode", () => {
-  expect(renderRoutesYaml([], { tls: 'default' })).toBe('# no routes\n')
+  expect(renderRoutesYaml([], { tls: 'entrypoint' })).toBe('# no routes\n')
   expect(renderRoutesYaml([], { tls: 'resolver' })).toBe('# no routes\n')
 })
 
-test("'default' still validates every route", () => {
+test("'entrypoint' still validates every route", () => {
   expect(() =>
-    renderRoutesYaml([{ serviceInstanceId: 'si1', hostnames: ['A.example.com'], upstreamUrl: 'http://x:1' }], { tls: 'default' }),
+    renderRoutesYaml([{ serviceInstanceId: 'si1', hostnames: ['A.example.com'], upstreamUrl: 'http://x:1' }], { tls: 'entrypoint' }),
   ).toThrow('invalid hostname: A.example.com')
 })
 
