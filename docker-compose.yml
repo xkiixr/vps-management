@@ -1,0 +1,82 @@
+name: vpsm
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      # postgres 18 keeps its data in a versioned directory under /var/lib/postgresql.
+      - vpsm-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - control
+
+  traefik:
+    image: traefik:v3.7
+    container_name: vpsm-traefik
+    restart: unless-stopped
+    mem_limit: 256m
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - vpsm-acme:/acme
+      - vpsm-traefik-dynamic:/traefik/dynamic:ro
+    # Routes come from files the worker writes into the dynamic directory. The API and dashboard stay off.
+    command:
+      - --providers.file.directory=/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --log.level=INFO
+    # The worker connects this container to each project's network when it deploys.
+    networks:
+      - edge
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    container_name: vpsm-worker
+    restart: unless-stopped
+    mem_limit: 768m
+    stop_grace_period: 60s
+    env_file: .env
+    volumes:
+      # Root-equivalent access to the host. The worker is the only service that gets the socket, and it publishes no ports.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - vpsm-traefik-dynamic:/traefik/dynamic
+      - vpsm-work:/var/lib/vpsm/work
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - control
+
+networks:
+  control:
+    name: vpsm-control
+  edge:
+    name: vpsm-edge
+
+volumes:
+  vpsm-pgdata:
+    name: vpsm-pgdata
+  vpsm-acme:
+    name: vpsm-acme
+  vpsm-traefik-dynamic:
+    name: vpsm-traefik-dynamic
+  vpsm-work:
+    name: vpsm-work

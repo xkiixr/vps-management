@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "tsup"
+  },
   "dependencies": {
     "@vpsm/core": "workspace:*",
     "@vpsm/db": "workspace:*",
@@ -12,6 +15,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/dockerode": "^4.0.2"
+    "@types/dockerode": "^4.0.2",
+    "tsup": "^9.0.0"
   }
 }
