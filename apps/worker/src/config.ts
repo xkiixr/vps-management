@@ -21,7 +21,15 @@ const text = (fallback: string) => z.string().default(fallback)
 const absolutePath = (fallback: string) => text(fallback).refine((p) => path.isAbsolute(p), 'must be an absolute path')
 const positiveInt = (fallback: number) => z.coerce.number().int().positive().default(fallback)
 
-const schema = z.object({
+/** The resolved path with a trailing separator, so `/a/b` is not taken for a parent of `/a/bc`. */
+function asDir(p: string): string {
+  const resolved = path.resolve(p)
+  return resolved.endsWith(path.sep) ? resolved : resolved + path.sep
+}
+const depth = (p: string) => path.resolve(p).split(path.sep).filter(Boolean).length
+const overlaps = (a: string, b: string) => asDir(a).startsWith(asDir(b)) || asDir(b).startsWith(asDir(a))
+
+const fields = z.object({
   APPS_DOMAIN: z
     .string({ error: 'is required' })
     .refine(isValidHostname, 'must be a lowercase hostname such as apps.example.com'),
@@ -35,9 +43,20 @@ const schema = z.object({
   BUILD_TIMEOUT_MINUTES: positiveInt(20),
   DRAIN_SECONDS: z.coerce.number().int().nonnegative().default(10),
   IMAGE_RETENTION: positiveInt(5),
-  // Each deployment's checkout lives in `${WORK_DIR}/<id>` and is deleted recursively afterwards.
-  WORK_DIR: absolutePath('/var/lib/vpsm/work'),
+  // Each deployment's checkout lives in `${WORK_DIR}/<id>` and is deleted recursively afterwards; the
+  // worker also empties WORK_DIR at startup, so it must be a directory of its own.
+  WORK_DIR: absolutePath('/var/lib/vpsm/work').refine(
+    (p) => !path.isAbsolute(p) || depth(p) >= 2,
+    'must be a dedicated directory at least two levels below / (such as /var/lib/vpsm/work)',
+  ),
   GITHUB_TOKEN: z.string().optional(),
+})
+
+const schema = fields.superRefine((e, ctx) => {
+  if (!path.isAbsolute(e.WORK_DIR) || !path.isAbsolute(e.TRAEFIK_DYNAMIC_DIR)) return
+  if (overlaps(e.WORK_DIR, e.TRAEFIK_DYNAMIC_DIR)) {
+    ctx.addIssue({ code: 'custom', path: ['WORK_DIR'], message: 'must not be, contain or be inside TRAEFIK_DYNAMIC_DIR' })
+  }
 })
 
 /** Reads the worker's settings from the environment. Throws one message naming every bad variable (never their values). */

@@ -31,8 +31,8 @@ const MISSING: ContainerState = {
 }
 
 /**
- * An in-memory Docker. `run`, `attachAlias` and `stopAndRemove` are recorded in `events` as
- * `run <name>`, `alias <name> <aliases joined by ,>` and `stop <name>`.
+ * An in-memory Docker. `run`, `attachAlias`, `stopAndRemove` and `restart` are recorded in `events` as
+ * `run <name>`, `alias <name> <aliases joined by ,>`, `stop <name>` and `restart <name>`.
  */
 export class FakeDocker implements DockerRuntime {
   readonly existingImages = new Set<string>()
@@ -155,6 +155,7 @@ export class FakeDocker implements DockerRuntime {
   async restart(name: string): Promise<void> {
     const container = this.containers.get(name)
     if (!container) throw new Error(`no container ${name}`)
+    this.events.push(`restart ${name}`)
     container.state = { ...container.state, running: true, restarting: false, restartCount: container.state.restartCount + 1 }
   }
 

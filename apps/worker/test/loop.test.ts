@@ -57,6 +57,7 @@ let listeners: { channel: string; notify: () => void; unlistened: boolean }[]
 let order: string[]
 let concurrent: number
 let maxConcurrent: number
+let clock: number
 
 afterAll(() => t.close())
 beforeEach(async () => {
@@ -91,6 +92,7 @@ beforeEach(async () => {
   order = []
   concurrent = 0
   maxConcurrent = 0
+  clock = Date.parse('2026-10-01T00:00:00Z')
   vi.mocked(runDeployment).mockReset()
   fakeRun(async () => new Promise((r) => setTimeout(r, 50)))
 })
@@ -128,7 +130,16 @@ async function get(d: { id: string }): Promise<Deployment> {
   return row!
 }
 
-const queue = (service: string) => enqueueDeployment(db, { serviceInstanceId: instances[service]!, trigger: 'manual' })
+/**
+ * Enqueues a deployment of `service`. Its `created_at` (the claim order) is pinned one second after the
+ * previous one's: the test database's clock can step backwards between two transactions.
+ */
+async function queue(service: string): Promise<Deployment> {
+  const d = await enqueueDeployment(db, { serviceInstanceId: instances[service]!, trigger: 'manual' })
+  clock += 1000
+  await db.update(deployments).set({ createdAt: new Date(clock) }).where(eq(deployments.id, d.id))
+  return d
+}
 
 function start() {
   loop = startDeployLoop(deps, controller.signal)

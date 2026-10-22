@@ -91,6 +91,33 @@ test('interrupted deployments become FAILED and orphans are removed, live one un
   expect(deps.docker.has('vpsm-web-d1000000')).toBe(false)
   expect(stopAndRemove).toHaveBeenCalledExactlyOnceWith('vpsm-web-d1000000', 0)
   expect(deps.events).toContain('routes')
+  // Routes stop pointing at an orphan before it is removed.
+  expect(deps.events).toEqual(['routes', 'stop vpsm-web-d1000000'])
+})
+
+test('starts live containers that are stopped (e.g. after a host reboot) and marks vanished ones CRASHED, before routing', async () => {
+  const stopped = await live('vpsm-web-live0000')
+  seed('vpsm-web-live0000', stopped.id)
+  deps.docker.setState('vpsm-web-live0000', { running: false, restarting: false, exitCode: 255, restartCount: 0 })
+
+  expect(await recoverInterruptedDeployments(deps)).toEqual({ failed: 0, removedContainers: 0 })
+
+  expect(deps.events).toEqual(['restart vpsm-web-live0000', 'routes'])
+  expect((await get(stopped)).status).toBe('SUCCESS')
+})
+
+test('a live deployment whose container vanished is CRASHED before the routes are rewritten', async () => {
+  const gone = await live('vpsm-web-gone0000')
+  let statusWhenRouting: string | undefined
+  deps.regenerateRoutes = async () => {
+    statusWhenRouting = (await get(gone)).status
+    deps.events.push('routes')
+  }
+
+  await recoverInterruptedDeployments(deps)
+
+  expect(statusWhenRouting).toBe('CRASHED')
+  expect((await get(gone)).failureReason).toBe('container disappeared')
 })
 
 test('keeps a CRASHED deployment container, removes containers of finished or unknown deployments', async () => {

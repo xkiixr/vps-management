@@ -1,22 +1,15 @@
 import { eq } from 'drizzle-orm'
-import { deployments, InvalidTransitionError, setDeploymentStatus } from '@vpsm/db'
+import { deployments } from '@vpsm/db'
 import type { PipelineDeps } from '../deploy/pipeline'
-import type { ContainerState } from '../runtime/docker-runtime'
+import { isCrashFinal, markCrashed, reconcileLiveDeployments } from './reconcile'
+
+export { isCrashFinal }
 
 /** Lets Docker apply its restart policy before the container's state is read. */
 const SETTLE_MS = 2000
 const RESUBSCRIBE_DELAY_MS = 5000
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
-
-/** True once Docker will not restart the container again. */
-export function isCrashFinal(s: ContainerState): boolean {
-  return (
-    !s.running &&
-    !s.restarting &&
-    (s.restartPolicy === 'no' || (s.restartPolicy === 'on-failure' && s.restartCount >= s.maxRetries))
-  )
-}
 
 /**
  * Marks the deployment of a container that just died CRASHED, if Docker has given up restarting it and
@@ -37,19 +30,16 @@ export async function handleContainerDeath(deps: PipelineDeps, name: string, sig
       .where(eq(deployments.id, deploymentId))
     if (deployment?.status !== 'SUCCESS') return
 
-    await setDeploymentStatus(deps.db, deploymentId, 'CRASHED', {
-      failureReason: `container exited with code ${state.exitCode}`,
-    })
+    await markCrashed(deps.db, deploymentId, `container exited with code ${state.exitCode}`)
   } catch (error) {
-    // Replaced or already marked in the meantime: it is no longer the live deployment.
-    if (error instanceof InvalidTransitionError) return
     console.error(`crash monitor: could not check container ${name}: ${messageOf(error)}`)
   }
 }
 
 /**
  * Watches managed containers for exits until `signal` aborts. Docker's event stream does not reconnect
- * by itself, so after it breaks the monitor subscribes again 5 seconds later.
+ * by itself, so after it breaks the monitor subscribes again 5 seconds later. Every (re)subscription is
+ * followed by a reconcile, which catches containers that died while nothing was listening.
  */
 export function startCrashMonitor(deps: PipelineDeps, signal: AbortSignal): void {
   if (signal.aborted) return
@@ -80,8 +70,11 @@ export function startCrashMonitor(deps: PipelineDeps, signal: AbortSignal): void
       },
     )
     // The stream may already have failed while subscribing.
-    if (mine === generation) unsubscribe = unsub
-    else unsub()
+    if (mine !== generation) return unsub()
+    unsubscribe = unsub
+    reconcileLiveDeployments(deps, { startStopped: false }).catch((error) => {
+      console.error(`crash monitor: could not reconcile live deployments: ${messageOf(error)}`)
+    })
   }
 
   signal.addEventListener('abort', end, { once: true })

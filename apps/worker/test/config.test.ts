@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import { loadConfig } from '../src/config'
 
 test('defaults and required APPS_DOMAIN', () => {
@@ -96,4 +96,50 @@ test('the error never contains the token', () => {
   }
   expect(message).toMatch(/APPS_DOMAIN/)
   expect(message).not.toContain('ghs_secret')
+})
+
+describe('WORK_DIR is emptied at startup, so it must be a dedicated directory', () => {
+  const load = (env: Record<string, string>) => () => loadConfig({ APPS_DOMAIN: 'apps.example.com', ...env })
+
+  test.each(['/', '//', '/work', '/var/lib/..', '/var/../work/'])(
+    'WORK_DIR=%s (a root or top-level directory) is rejected',
+    (dir) => {
+      expect(load({ WORK_DIR: dir })).toThrow(/WORK_DIR/)
+    },
+  )
+
+  test.each([
+    ['/traefik/dynamic', '/traefik/dynamic'],
+    ['/traefik/dynamic/', '/traefik/dynamic'],
+    ['/traefik/dynamic/work', '/traefik/dynamic'],
+    ['/srv/vpsm', '/srv/vpsm/traefik'],
+    ['/srv/vpsm/x/../traefik', '/srv/vpsm/traefik'],
+  ])('WORK_DIR=%s overlapping TRAEFIK_DYNAMIC_DIR=%s is rejected', (workDir, traefikDir) => {
+    expect(load({ WORK_DIR: workDir, TRAEFIK_DYNAMIC_DIR: traefikDir })).toThrow(/WORK_DIR/)
+  })
+
+  test.each([
+    ['/var/lib/vpsm/work', '/traefik/dynamic'],
+    ['/data/work', '/data/traefik'],
+    ['/srv/vpsm/traefik-work', '/srv/vpsm/traefik'],
+  ])('WORK_DIR=%s next to TRAEFIK_DYNAMIC_DIR=%s is accepted', (workDir, traefikDir) => {
+    expect(load({ WORK_DIR: workDir, TRAEFIK_DYNAMIC_DIR: traefikDir })().workDir).toBe(workDir)
+  })
+
+  test('the error names WORK_DIR without echoing any value', () => {
+    let message = ''
+    try {
+      loadConfig({ APPS_DOMAIN: 'apps.example.com', WORK_DIR: '/srv/secretish/dyn', TRAEFIK_DYNAMIC_DIR: '/srv/secretish/dyn' })
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toMatch(/WORK_DIR/)
+    expect(message).not.toContain('secretish')
+  })
+
+  test('a relative WORK_DIR gets one clear message', () => {
+    expect(load({ WORK_DIR: 'relative/work' })).toThrow(
+      /^invalid worker configuration: WORK_DIR must be an absolute path$/,
+    )
+  })
 })

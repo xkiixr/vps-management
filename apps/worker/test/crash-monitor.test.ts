@@ -12,7 +12,22 @@ import {
 } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
 import { handleContainerDeath, isCrashFinal, startCrashMonitor } from '../src/monitor/crash-monitor'
+import { reconcileLiveDeployments } from '../src/monitor/reconcile'
 import { fakeDeps, type FakeDeps } from './fakes'
+
+// The real reconcileLiveDeployments, with every run it started kept so a test can wait for it.
+const reconciles = vi.hoisted(() => [] as Promise<unknown>[])
+vi.mock('../src/monitor/reconcile', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/monitor/reconcile')>()
+  return {
+    ...actual,
+    reconcileLiveDeployments: vi.fn((...args: Parameters<typeof actual.reconcileLiveDeployments>) => {
+      const run = actual.reconcileLiveDeployments(...args)
+      reconciles.push(run)
+      return run
+    }),
+  }
+})
 
 const t = await setupTestDb()
 const { db } = t
@@ -33,12 +48,22 @@ beforeEach(async () => {
   instanceId = instance.id
   deps = fakeDeps(db)
   controller = new AbortController()
+  reconciles.length = 0
+  vi.mocked(reconcileLiveDeployments).mockClear()
 })
-afterEach(() => {
+afterEach(async () => {
   controller.abort()
+  // A reconcile still running would otherwise read the next test's rows.
+  await Promise.allSettled(reconciles)
   fs.rmSync(deps.config.workDir, { recursive: true, force: true })
   vi.restoreAllMocks()
 })
+
+/** Starts the monitor and waits for the reconcile that follows its subscription. */
+async function startMonitor(): Promise<void> {
+  startCrashMonitor(deps, controller.signal)
+  await Promise.allSettled(reconciles)
+}
 
 async function get(d: { id: string }): Promise<Deployment> {
   const [row] = await db.select().from(deployments).where(eq(deployments.id, d.id))
@@ -69,6 +94,10 @@ test.each([
   [{ running: false, restarting: true, restartPolicy: 'on-failure', restartCount: 3, maxRetries: 10 }, false],
   [{ running: false, restarting: false, restartPolicy: 'no', restartCount: 0, maxRetries: 0 }, true],
   [{ running: false, restarting: false, restartPolicy: 'unless-stopped', restartCount: 50, maxRetries: 0 }, false],
+  // Docker does not restart a clean exit under on-failure.
+  [{ running: false, restarting: false, restartPolicy: 'on-failure', restartCount: 0, maxRetries: 10, exitCode: 0 }, true],
+  [{ running: true, restarting: false, restartPolicy: 'on-failure', restartCount: 0, maxRetries: 10, exitCode: 0 }, false],
+  [{ running: false, restarting: false, restartPolicy: 'unless-stopped', restartCount: 0, maxRetries: 0, exitCode: 0 }, false],
 ])('isCrashFinal %j', (s, expected) => expect(isCrashFinal({ exists: true, exitCode: 1, ...s })).toBe(expected))
 
 test('isCrashFinal is false for a running container and for one that no longer exists', () => {
@@ -80,7 +109,7 @@ test('isCrashFinal is false for a running container and for one that no longer e
 describe('startCrashMonitor', () => {
   test('final crash marks live deployment CRASHED', async () => {
     const d = await live('vpsm-web-live0000')
-    startCrashMonitor(deps, controller.signal)
+    await startMonitor()
 
     deps.docker.setState('vpsm-web-live0000', crashedFinally)
     deps.docker.emitDie('vpsm-web-live0000')
@@ -90,6 +119,17 @@ describe('startCrashMonitor', () => {
     expect(deps.events).toContain('sleep 2000')
   })
 
+  test('a clean exit under on-failure is final too', async () => {
+    const d = await live('vpsm-web-live0000')
+    await startMonitor()
+
+    deps.docker.setState('vpsm-web-live0000', { running: false, restarting: false, exitCode: 0, restartCount: 0 })
+    deps.docker.emitDie('vpsm-web-live0000')
+
+    await vi.waitFor(async () => expect((await get(d)).status).toBe('CRASHED'))
+    expect((await get(d)).failureReason).toBe('container exited with code 0')
+  })
+
   test('reads the container state only after waiting 2 seconds', async () => {
     const d = await live('vpsm-web-live0000')
     const wait = deferred()
@@ -97,7 +137,7 @@ describe('startCrashMonitor', () => {
       deps.events.push(`sleep ${ms}`)
       await wait.promise
     }
-    startCrashMonitor(deps, controller.signal)
+    await startMonitor()
 
     deps.docker.setState('vpsm-web-live0000', { running: false, restarting: true })
     deps.docker.emitDie('vpsm-web-live0000')
@@ -118,7 +158,7 @@ describe('startCrashMonitor', () => {
       deps.events.push(`sleep ${ms}`)
       if (ms === 5000) await wait.promise
     }
-    startCrashMonitor(deps, controller.signal)
+    await startMonitor()
     expect(deps.docker.dieSubscribers).toBe(1)
 
     deps.docker.failEventStream(new Error('docker event stream closed'))
@@ -129,7 +169,47 @@ describe('startCrashMonitor', () => {
 
     wait.resolve()
     await vi.waitFor(() => expect(deps.docker.dieSubscribers).toBe(1))
+    await vi.waitFor(() => expect(reconciles).toHaveLength(2))
+    await reconciles[1]
 
+    deps.docker.setState('vpsm-web-live0000', crashedFinally)
+    deps.docker.emitDie('vpsm-web-live0000')
+    await vi.waitFor(async () => expect((await get(d)).status).toBe('CRASHED'))
+  })
+
+  test('reconciles live deployments after every (re)subscribe, catching deaths no event reported', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const d = await live('vpsm-web-live0000')
+    const wait = deferred()
+    deps.sleep = async (ms) => {
+      if (ms === 5000) await wait.promise
+    }
+    await startMonitor()
+    expect(reconcileLiveDeployments).toHaveBeenCalledExactlyOnceWith(deps, { startStopped: false })
+    expect((await get(d)).status).toBe('SUCCESS')
+
+    deps.docker.failEventStream(new Error('boom'))
+    // Dies while the monitor is not subscribed: its die event reaches nobody.
+    deps.docker.setState('vpsm-web-live0000', crashedFinally)
+    deps.docker.emitDie('vpsm-web-live0000')
+    wait.resolve()
+
+    await vi.waitFor(() => expect(reconciles).toHaveLength(2))
+    await reconciles[1]
+    expect(reconcileLiveDeployments).toHaveBeenLastCalledWith(deps, { startStopped: false })
+    expect((await get(d)).status).toBe('CRASHED')
+    expect((await get(d)).failureReason).toBe('container exited with code 1')
+  })
+
+  test('a failed reconcile is reported and the monitor keeps watching', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const d = await live('vpsm-web-live0000')
+    vi.spyOn(deps.docker, 'state').mockRejectedValueOnce(new Error('daemon down'))
+
+    await startMonitor()
+
+    expect(error).toHaveBeenCalledOnce()
+    expect(String(error.mock.calls[0]![0])).toContain('daemon down')
     deps.docker.setState('vpsm-web-live0000', crashedFinally)
     deps.docker.emitDie('vpsm-web-live0000')
     await vi.waitFor(async () => expect((await get(d)).status).toBe('CRASHED'))
@@ -161,6 +241,7 @@ describe('startCrashMonitor', () => {
     controller.abort()
     startCrashMonitor(deps, controller.signal)
     expect(deps.docker.dieSubscribers).toBe(0)
+    expect(reconcileLiveDeployments).not.toHaveBeenCalled()
   })
 })
 
