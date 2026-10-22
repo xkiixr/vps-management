@@ -1,9 +1,9 @@
-import { expect, type Page, test } from '@playwright/test'
+import { expect, type Page, type Response, test } from '@playwright/test'
 import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, TEAMMATE_EMAIL } from './env'
 
 test.skip(process.env.E2E !== '1', 'set E2E=1 to run the browser smoke test (see playwright.config.ts)')
-// Both tests share one server and one scratch database but not their data: the second signs in on its own and
-// works in a project of its own, so neither needs the other to have run (or passed).
+// The tests share one server and one scratch database but not their data: each signs in on its own and works in a
+// project of its own, so none needs another to have run (or passed).
 
 async function signIn(page: Page): Promise<void> {
   await page.goto('/login')
@@ -53,6 +53,25 @@ test('sign in, create a project and a service, see it queued, sign out', async (
     await page.goto('/')
     await expect(page).toHaveURL('/login')
   })
+})
+
+// The panel is same-site with the team's apps, so one of them could frame it and have an admin click inside the
+// frame (next.config.ts). The real server must send the headers that forbid it, before and after signing in.
+test('no page of the panel can be framed, signed in or not', async ({ page }) => {
+  const expectUnframeable = (response: Response | null) => {
+    expect(response).not.toBeNull()
+    const headers = response!.headers()
+    expect(headers['x-frame-options']).toBe('DENY')
+    expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")
+  }
+
+  expectUnframeable(await page.goto('/login'))
+
+  await signIn(page)
+  const projects = await page.goto('/')
+  await expect(page).toHaveURL('/')
+  await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible()
+  expectUnframeable(projects)
 })
 
 // Regression test for the hang found in Task 10b. Next 16 spun at 100% CPU, never answered and ignored SIGTERM

@@ -273,6 +273,7 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
 
 - cookie ของ session ชื่อ `__Host-vpsm_session` เป็น `HttpOnly`, `Secure`, `Path=/` และไม่มี `Domain` แอปบน subdomain อื่นอ่านหรือเขียนทับไม่ได้
 - ทุกการแก้ข้อมูล (server action) ตรวจ header `Origin` ให้ตรงกับ `https://<PANEL_DOMAIN>` แบบเป๊ะ ไม่ตรงหรือไม่มีจะปฏิเสธ
+- ทุกหน้าของ panel ส่ง `X-Frame-Options: DENY` และ `Content-Security-Policy: frame-ancestors 'none'` (ตั้งใน `apps/web/next.config.ts`) แอปบน subdomain อื่นจึงฝัง panel ไว้ใน frame เพื่อหลอกให้ admin กดปุ่มไม่ได้ ถ้าไม่มีสอง header นี้ การกดใน frame จะผ่านการตรวจ `Origin` ข้างบนได้ เพราะคำขอมาจากหน้า panel เอง
 - ล็อกอินผิดเกิน 10 ครั้งใน 15 นาทีจาก IP และอีเมลเดียวกันจะถูกปฏิเสธชั่วคราว (ตัวจำกัดนี้เชื่อ `X-Forwarded-For` รายการแรกที่ Traefik ตั้ง จึงห้ามตั้ง `forwardedHeaders` ให้ Traefik)
 
 ถึงอย่างนั้นก็ควร deploy เฉพาะโค้ดของทีมที่เชื่อถือได้ เพราะโค้ดที่รันบน subdomain เดียวกันกับ panel เป็นด่านที่อ่อนที่สุดของระบบนี้
