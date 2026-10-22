@@ -25,7 +25,7 @@ import { NotFoundError } from './errors'
 
 export const CONFIRM_MESSAGE = 'type the project name to confirm'
 
-async function visibleProject(db: Db, actor: Actor, name: string): Promise<Project> {
+export async function visibleProject(db: Db, actor: Actor, name: string): Promise<Project> {
   // The name of a bound action argument comes from the browser and is not guaranteed to be text.
   const project = typeof name === 'string' ? await findProjectFor(db, actor, name) : null
   if (!project) throw new NotFoundError()
@@ -33,7 +33,7 @@ async function visibleProject(db: Db, actor: Actor, name: string): Promise<Proje
 }
 
 // Runs a change that may refuse with a message meant for the user. null when it went through.
-async function refusal(change: () => Promise<unknown>): Promise<{ error: string } | null> {
+export async function refusal(change: () => Promise<unknown>): Promise<{ error: string } | null> {
   try {
     await change()
     return null

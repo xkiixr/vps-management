@@ -1,12 +1,18 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { findProjectFor, listMembers } from '@vpsm/db'
+import { findProjectFor, listMembers, listServices } from '@vpsm/db'
+import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { formatDateTime } from '@/lib/format'
+import { webConfig } from '@/server/config'
 import { getDb } from '@/server/db'
 import { requireUser } from '@/server/guards'
+import { maxServiceMemoryMb } from '@/server/limits'
 import { DeleteProjectForm } from './delete-project-form'
+import { NewServiceForm } from './new-service-form'
 
 type Props = { params: Promise<{ project: string }> }
 
@@ -22,7 +28,11 @@ export default async function ProjectPage({ params }: Props) {
   // A project that does not exist and one the user may not see are the same 404.
   const project = await findProjectFor(db, { id: user.id, role: user.role }, projectName)
   if (!project) notFound()
-  const members = await listMembers(db, project.id)
+  const [members, services, maxMemoryMb] = await Promise.all([
+    listMembers(db, project.id),
+    listServices(db, project.id, { httpsPort: webConfig().httpsPort }),
+    maxServiceMemoryMb(db),
+  ])
 
   return (
     <div className="grid gap-8">
@@ -47,10 +57,57 @@ export default async function ProjectPage({ params }: Props) {
         </h2>
         <Card>
           <CardContent>
-            <p className="py-6 text-center text-sm text-muted-foreground">No services yet.</p>
+            {services.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">No services yet. Create the first one below.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>URL</TableHead>
+                    <TableHead>Last deploy</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {services.map(({ service, url, latest }) => (
+                    <TableRow key={service.id}>
+                      <TableCell>
+                        <Link href={`/projects/${project.name}/services/${service.name}`} className="font-medium hover:underline">
+                          {service.name}
+                        </Link>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={latest?.status ?? null} />
+                      </TableCell>
+                      <TableCell>
+                        {url ? (
+                          <a href={url} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                            {url}
+                          </a>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{latest ? formatDateTime(latest.createdAt) : '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </CardContent>
         </Card>
       </section>
+
+      <Card className="max-w-3xl">
+        <CardHeader>
+          <CardTitle>New service</CardTitle>
+          <CardDescription>Builds the repository and deploys it as soon as the service is created.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <NewServiceForm projectName={project.name} maxMemoryMb={maxMemoryMb} />
+        </CardContent>
+      </Card>
 
       <Card className="max-w-lg">
         <CardHeader>

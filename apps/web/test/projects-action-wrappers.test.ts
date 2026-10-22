@@ -3,8 +3,8 @@ import { createProject, createUser, listMembers, type SafeUser } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
 
 // The server action wrappers need Next's request scope (headers, the session cookie, the cache), which does not
-// exist in a unit test: those are replaced here, and the rest (origin check, parsing, access rules, audit,
-// redirect()/notFound(), the generic error) is the real code.
+// exist in a unit test: those are replaced here, and the rest (origin check, session guard, parsing, access
+// rules, audit, redirect()/notFound(), the generic error) is the real code.
 const mocks = vi.hoisted(() => ({
   db: undefined as unknown,
   origin: 'https://panel.example.com' as string | null,
@@ -15,13 +15,15 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('next/headers', () => ({
   headers: async () => new Headers(mocks.origin === null ? {} : { origin: mocks.origin }),
+  cookies: async () => ({ get: () => undefined, set: () => {} }),
 }))
 vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidatePath }))
 vi.mock('@/server/config', () => ({ webConfig: () => ({ panelOrigin: 'https://panel.example.com' }) }))
 vi.mock('@/server/db', () => ({ getDb: () => mocks.db }))
-vi.mock('@/server/guards', () => ({
-  requireUser: async () => {
-    mocks.order.push('requireUser')
+// The session lookup is the one thing under the real guards that is replaced: `order` shows whether it ran.
+vi.mock('@/server/session', () => ({
+  resolveSessionUser: async () => {
+    mocks.order.push('session')
     return mocks.user
   },
 }))
@@ -70,7 +72,7 @@ const NO_STATE = {}
 const projectNames = async () => (await t.sql`select name from projects order by name`).map((row) => row.name)
 const auditActions = async () => (await t.sql`select action from audit_events order by id`).map((row) => row.action)
 
-describe('every action starts with the same-origin check', () => {
+describe('every action starts with the same-origin check, then the session', () => {
   const attempts: [string, () => Promise<unknown>][] = [
     ['createProjectAction', () => createProjectAction(NO_STATE, form({ name: 'shop' }))],
     ['deleteProjectAction', () => deleteProjectAction('shop', NO_STATE, form({ confirm: 'shop' }))],
@@ -85,6 +87,16 @@ describe('every action starts with the same-origin check', () => {
       await expect(run()).rejects.toBeInstanceOf(ForbiddenError)
     }
     expect(mocks.order).toEqual([])
+    expect(await projectNames()).toEqual(['shop'])
+    expect(await auditActions()).toEqual([])
+    expect(mocks.revalidatePath).not.toHaveBeenCalled()
+  })
+
+  test.each(attempts)('%s sends someone who is not signed in to /login and does nothing', async (_name, run) => {
+    await createProject(t.db, 'shop', ada.id)
+    mocks.user = null
+    expect(redirectTarget(await nextErrorDigest(run))).toBe('/login')
+    expect(mocks.order).toEqual(['session'])
     expect(await projectNames()).toEqual(['shop'])
     expect(await auditActions()).toEqual([])
     expect(mocks.revalidatePath).not.toHaveBeenCalled()

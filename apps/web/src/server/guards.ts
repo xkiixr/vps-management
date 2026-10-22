@@ -1,8 +1,10 @@
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 import { notFound, redirect } from 'next/navigation'
 import { cache } from 'react'
-import type { SafeUser } from '@vpsm/db'
+import type { Actor, Db, SafeUser } from '@vpsm/db'
+import { webConfig } from './config'
 import { getDb } from './db'
+import { assertSameOrigin } from './origin'
 import { type CookieJar, resolveSessionUser } from './session'
 
 export function ensureUser(user: SafeUser | null): SafeUser {
@@ -49,4 +51,15 @@ export async function requireUser(): Promise<SafeUser> {
 /** The signed-in admin; members get a 404 and anyone not signed in is redirected to /login. */
 export async function requireAdmin(): Promise<SafeUser> {
   return ensureAdmin(await requireUser())
+}
+
+/**
+ * The start of every server action that works for a signed-in user, and the only way one starts: the request
+ * must come from the panel's own pages (see assertSameOrigin), then there must be a signed-in user (anyone else
+ * is sent to /login). Nothing else is read or done before both. Returns what the action needs to work as that user.
+ */
+export async function beginAction(): Promise<{ db: Db; actor: Actor }> {
+  assertSameOrigin(await headers(), webConfig().panelOrigin)
+  const user = await requireUser()
+  return { db: getDb(), actor: { id: user.id, role: user.role } }
 }
