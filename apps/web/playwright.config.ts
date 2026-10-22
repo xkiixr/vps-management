@@ -9,7 +9,7 @@ import { E2E_ORIGIN } from './e2e/env'
 export default defineConfig({
   testDir: './e2e',
   testMatch: '*.spec.ts',
-  // One server and one database, and the tests build on each other.
+  // One server and one scratch database for all tests, so one worker.
   workers: 1,
   fullyParallel: false,
   forbidOnly: !!process.env.CI,

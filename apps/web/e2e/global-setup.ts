@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process'
+import net from 'node:net'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createUser, generatePassword } from '@vpsm/db'
@@ -7,7 +8,7 @@ import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_PORT, TEAMMATE_EMAIL }
 
 const webDir = path.resolve(import.meta.dirname, '..')
 const SERVER_START_TIMEOUT_MS = 60_000
-/** A server that is wedged (see no-js-form.spec.ts) ignores SIGTERM, so it gets this long before SIGKILL. */
+/** A server that is wedged (see the no-JS test in smoke.spec.ts) ignores SIGTERM, so it gets this long before SIGKILL. */
 const SERVER_STOP_TIMEOUT_MS = 5_000
 
 function run(command: string, args: string[], cwd: string): Promise<void> {
@@ -19,6 +20,17 @@ function run(command: string, args: string[], cwd: string): Promise<void> {
     child.on('error', reject)
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${command} ${args.join(' ')} exited with ${code}\n${output}`))))
   })
+}
+
+/** True when something already accepts connections on the port, on either loopback address `localhost` can mean. */
+async function portInUse(port: number): Promise<boolean> {
+  const listening = (host: string) =>
+    new Promise<boolean>((resolve) => {
+      const socket = net.connect({ port, host })
+      socket.once('connect', () => (socket.destroy(), resolve(true)))
+      socket.once('error', () => resolve(false))
+    })
+  return (await listening('127.0.0.1')) || (await listening('::1'))
 }
 
 async function stop(server: ChildProcess): Promise<void> {
@@ -48,6 +60,13 @@ async function waitUntilServing(server: ChildProcess, output: () => string): Pro
 // Builds the dashboard as the Docker image does, starts the standalone server on a scratch database that holds
 // an admin and a second user, and returns what stops the server and drops the database.
 export default async function globalSetup(): Promise<() => Promise<void>> {
+  // Checked before anything is created: a leftover server (or a dev server) on this port would be mistaken for
+  // the one under test, and the tests would run against another database.
+  if (await portInUse(E2E_PORT)) {
+    throw new Error(
+      `port ${E2E_PORT} is already in use, so the dashboard under test cannot start there. Stop whatever listens on it (lsof -nP -iTCP:${E2E_PORT} -sTCP:LISTEN) and run the tests again.`,
+    )
+  }
   const testDb = await setupTestDb()
   let server: ChildProcess | undefined
   const teardown = async () => {

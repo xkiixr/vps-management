@@ -2,8 +2,8 @@ import { expect, type Page, test } from '@playwright/test'
 import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, TEAMMATE_EMAIL } from './env'
 
 test.skip(process.env.E2E !== '1', 'set E2E=1 to run the browser smoke test (see playwright.config.ts)')
-// The second test works on the database the first one filled, and both share one server.
-test.describe.configure({ mode: 'serial' })
+// Both tests share one server and one scratch database but not their data: the second signs in on its own and
+// works in a project of its own, so neither needs the other to have run (or passed).
 
 async function signIn(page: Page): Promise<void> {
   await page.goto('/login')

@@ -57,8 +57,36 @@ describe('web', () => {
     expect([...(web.networks ?? [])].sort()).toEqual(['control', 'edge'])
   })
 
-  test('reads .env, is limited and protected like the other services, and restarts', () => {
-    expect(web.env_file).toBe('.env')
+  // The dashboard faces the internet, so it gets exactly the settings it reads (apps/web/src/server/config.ts and
+  // limits.ts) and not the whole .env: GITHUB_TOKEN, POSTGRES_PASSWORD, ACME_EMAIL, COMPOSE_FILE and whatever is added later stay out.
+  test('gets an explicit list of settings and no env_file', () => {
+    expect(web.env_file).toBeUndefined()
+    expect(Object.keys(web.environment ?? {}).sort()).toEqual([
+      'APPS_DOMAIN',
+      'DATABASE_URL',
+      'MAX_SERVICE_MEMORY_MB',
+      'MEMORY_BUDGET_MB',
+      'PANEL_DOMAIN',
+      'PUBLIC_HTTPS_PORT',
+    ])
+    const text = JSON.stringify(web)
+    for (const secret of ['GITHUB_TOKEN', 'POSTGRES_PASSWORD', 'ACME_EMAIL', 'COMPOSE_FILE', 'DUCKDNS_TOKEN']) {
+      expect(text).not.toContain(secret)
+    }
+  })
+
+  test('takes each setting from .env, requiring the ones it cannot work without', () => {
+    expect(web.environment).toEqual({
+      DATABASE_URL: expect.stringMatching(/^\$\{DATABASE_URL:\?[^}]+\}$/),
+      APPS_DOMAIN: expect.stringMatching(/^\$\{APPS_DOMAIN:\?[^}]+\}$/),
+      PANEL_DOMAIN: expect.stringMatching(/^\$\{PANEL_DOMAIN:\?[^}]+\}$/),
+      PUBLIC_HTTPS_PORT: '${PUBLIC_HTTPS_PORT:-443}',
+      MEMORY_BUDGET_MB: '${MEMORY_BUDGET_MB:-5632}',
+      MAX_SERVICE_MEMORY_MB: '${MAX_SERVICE_MEMORY_MB:-2048}',
+    })
+  })
+
+  test('is limited and protected like the other services, and restarts', () => {
     expect(web.mem_limit).toBe('512m')
     expect(web.mem_reservation).toBe('128m')
     expect(web.oom_score_adj).toBe(-900)
@@ -96,7 +124,9 @@ test('Traefik has no forwardedHeaders setting: the login limiter trusts the X-Fo
   }
 })
 
-test('the alternate-port override gives the web service the same public port as the worker', () => {
+test('the alternate-port override gives the web service the same public port as the worker, and nothing else', () => {
+  expect(Object.keys(override.services.web?.environment ?? {})).toEqual(['PUBLIC_HTTPS_PORT'])
+  expect(override.services.web?.env_file).toBeUndefined()
   expect(override.services.web?.environment?.PUBLIC_HTTPS_PORT).toBe('${TRAEFIK_HTTPS_PORT:-8443}')
   expect(override.services.web?.environment?.PUBLIC_HTTPS_PORT).toBe(override.services.worker?.environment?.PUBLIC_HTTPS_PORT)
   expect(override.services.web?.ports).toBeUndefined()

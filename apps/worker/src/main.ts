@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createDb, migrate } from '@vpsm/db'
+import { bootWorker } from './boot'
 import { buildImage, ensureBuilder } from './build/build-image'
 import { chooseBuilder } from './build/choose-builder'
 import { railpackPrepare } from './build/railpack'
@@ -30,41 +31,48 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) throw new Error('DATABASE_URL is required')
 
-  // The healthcheck (and so the web dashboard, which waits for it) must not see a file from an earlier run.
-  await clearReady()
-  await migrate(databaseUrl)
-  const config = loadConfig()
-  const { db, sql, close } = createDb(databaseUrl)
-  const docker = createDockerRuntime()
-  await ensureBuilder(runCommand, (line) => console.log(`buildx: ${line}`))
-  // Without PANEL_DOMAIN the dashboard is not routed (and no hostname is reserved for it).
-  const panel = config.panelDomain ? { domain: config.panelDomain, upstream: config.panelUpstream } : undefined
+  // The order matters for the ready file the compose healthcheck (and so the web dashboard) waits for; see bootWorker.
+  const {
+    prepared: { deps, sql, close },
+  } = await bootWorker({
+    clearReady: () => clearReady(),
+    migrate: () => migrate(databaseUrl),
+    prepare: async () => {
+      const config = loadConfig()
+      const { db, sql, close } = createDb(databaseUrl)
+      const docker = createDockerRuntime()
+      await ensureBuilder(runCommand, (line) => console.log(`buildx: ${line}`))
+      // Without PANEL_DOMAIN the dashboard is not routed (and no hostname is reserved for it).
+      const panel = config.panelDomain ? { domain: config.panelDomain, upstream: config.panelUpstream } : undefined
 
-  const deps: PipelineDeps = {
-    db,
-    docker,
-    config,
-    run: runCommand,
-    sleep: (ms) => sleep(ms),
-    fetchSource,
-    chooseBuilder,
-    railpackPrepare,
-    buildImage,
-    waitHealthy,
-    regenerateRoutes: () => regenerateRoutes(db, config.traefikDynamicDir, undefined, routesTlsFor(config), panel),
-    cleanupImages: async (serviceInstanceId) => {
-      const removed = await cleanupImages({ db, docker, config }, serviceInstanceId)
-      if (removed.length > 0) console.log(`removed ${removed.length} old image(s): ${removed.join(', ')}`)
+      const deps: PipelineDeps = {
+        db,
+        docker,
+        config,
+        run: runCommand,
+        sleep: (ms) => sleep(ms),
+        fetchSource,
+        chooseBuilder,
+        railpackPrepare,
+        buildImage,
+        waitHealthy,
+        regenerateRoutes: () => regenerateRoutes(db, config.traefikDynamicDir, undefined, routesTlsFor(config), panel),
+        cleanupImages: async (serviceInstanceId) => {
+          const removed = await cleanupImages({ db, docker, config }, serviceInstanceId)
+          if (removed.length > 0) console.log(`removed ${removed.length} old image(s): ${removed.join(', ')}`)
+        },
+      }
+      return { deps, sql, close }
     },
-  }
-
-  const recovered = await recoverInterruptedDeployments(deps)
-  console.log(
-    `recovery: ${recovered.failed} interrupted deployment(s) marked FAILED, ${recovered.removedContainers} orphaned container(s) removed`,
-  )
-
-  // Migrated and recovered: the dashboard may start serving.
-  await markReady()
+    recover: async ({ deps }) => {
+      const recovered = await recoverInterruptedDeployments(deps)
+      console.log(
+        `recovery: ${recovered.failed} interrupted deployment(s) marked FAILED, ${recovered.removedContainers} orphaned container(s) removed`,
+      )
+      return recovered
+    },
+    markReady: () => markReady(),
+  })
 
   const controller = new AbortController()
   startCrashMonitor(deps, controller.signal)

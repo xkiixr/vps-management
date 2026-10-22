@@ -17,7 +17,7 @@
 
 - **worker มีสิทธิ์เทียบเท่า root บนเครื่อง VPS** เพราะถือ Docker socket (`/var/run/docker.sock`) ใครสั่งงาน worker ได้ก็ควบคุมทั้งเครื่องได้ และ worker รันเป็น root ใน container ของตัวเอง
 - **worker ต้องไม่เปิด port ใดๆ เด็ดขาด** ห้ามเพิ่ม `ports:` ให้ service `worker` ใน `docker-compose.yml` และห้าม mount Docker socket ให้ service อื่นหรือ container ของผู้ใช้
-- **`web` ต้องไม่เปิด port และไม่มี Docker socket** เข้าได้ทาง Traefik เท่านั้น (ดูหัวข้อ "Dashboard" เรื่อง panel ที่เป็น same-site กับแอปของทีม) และห้ามเพิ่ม `forwardedHeaders.insecure` หรือ `forwardedHeaders.trustedIPs` ให้ Traefik เพราะตัวจำกัดการล็อกอินของ panel เชื่อ `X-Forwarded-For` รายการแรกที่ Traefik ตั้งให้
+- **`web` ต้องไม่เปิด port และไม่มี Docker socket และไม่ได้รับ `.env` ทั้งไฟล์** `docker-compose.yml` ส่งให้เฉพาะตัวแปรที่ panel อ่านจริง (`DATABASE_URL`, `APPS_DOMAIN`, `PANEL_DOMAIN`, `PUBLIC_HTTPS_PORT`, `MEMORY_BUDGET_MB`, `MAX_SERVICE_MEMORY_MB`) `GITHUB_TOKEN` และ `ACME_EMAIL` จึงไม่เข้า container ของ panel (รหัสผ่านฐานข้อมูลอยู่ใน `DATABASE_URL` เพราะ panel ต้องใช้) ถ้าเพิ่มค่าตั้งที่ panel ต้องอ่าน ให้เพิ่มใน `environment:` ของ service `web` เอง เข้าได้ทาง Traefik เท่านั้น (ดูหัวข้อ "Dashboard" เรื่อง panel ที่เป็น same-site กับแอปของทีม) และห้ามเพิ่ม `forwardedHeaders.insecure` หรือ `forwardedHeaders.trustedIPs` ให้ Traefik เพราะตัวจำกัดการล็อกอินของ panel เชื่อ `X-Forwarded-For` รายการแรกที่ Traefik ตั้งให้
 - การควบคุมระบบในแผนนี้ทำผ่าน `sudo docker compose exec worker …` เท่านั้น ดังนั้นคนที่ใช้ `docker` บน VPS ได้ (กลุ่ม `docker` หรือ root) คือผู้ดูแลระบบทั้งหมด
 - คำสั่ง `docker` ทุกคำสั่งในคู่มือนี้ (หลังรันสคริปต์ติดตั้ง) ขึ้นต้นด้วย `sudo` เพราะสคริปต์ไม่ได้เพิ่มผู้ใช้เข้ากลุ่ม `docker` และไม่แนะนำให้เพิ่ม: สมาชิกกลุ่ม `docker` ได้สิทธิ์เทียบเท่า root โดยไม่ต้องใส่รหัสผ่าน การใช้ `sudo` ทำให้ทุกคำสั่งต้องยืนยันตัวตนและถูกบันทึกไว้
 - ไฟล์ `.env` เก็บรหัสผ่านฐานข้อมูลและ `GITHUB_TOKEN` ห้าม commit (อยู่ใน `.gitignore` แล้ว) และควรสั่ง `chmod 600 .env`
@@ -103,7 +103,7 @@ nano .env
 | `APPS_DOMAIN` | โดเมนของแอป เช่น `apps.example.com` (ตัวพิมพ์เล็ก) |
 | `ACME_EMAIL` | อีเมลสำหรับ Let's Encrypt **ต้องตั้ง** |
 | `PANEL_DOMAIN` | ชื่อโดเมนของหน้าเว็บจัดการ เช่น `panel.apps.example.com` (ใต้ `APPS_DOMAIN` ระดับเดียว) **ต้องตั้ง** ดูหัวข้อ "Dashboard" |
-| `MEMORY_BUDGET_MB` | งบ RAM รวมของแอปผู้ใช้ (ค่าเริ่มต้น 5632 = 8192 − 2560) เกินงบแล้วปฏิเสธการ deploy ทันที (ดูหัวข้อ "หน่วยความจำและ swap") |
+| `MEMORY_BUDGET_MB` | งบ RAM รวมของแอปผู้ใช้ ค่าเริ่มต้น 5632 MB (ตั้งไว้ตั้งแต่ก่อนมี `web` โดยเหลือ 2560 MB ไว้ให้ control plane และระบบ) ตอนนี้เพดานของ control plane รวม 2048 MB (postgres 512 + traefik 256 + worker 768 + web 512) 5632 + 2048 = 7680 MB จึงเหลือให้ระบบปฏิบัติการและ cache เพียงราว 512 MB ถ้าทุกส่วนใช้เต็มเพดาน และเมื่อรวม builder อีก 3072 MB เพดานรวมเกิน 8 GB ตามที่ตั้งใจและอธิบายไว้ในหัวข้อ "หน่วยความจำและ swap" (ควรมี swap หรือลดค่านี้) เกินงบแล้วปฏิเสธการ deploy ทันที |
 | `MAX_SERVICE_MEMORY_MB` | memory สูงสุดต่อ service (ค่าเริ่มต้น 2048) |
 | `GITHUB_TOKEN` | fine-grained token อ่านอย่างเดียว ใช้ clone repo (เว้นว่างได้ถ้า repo เป็น public) ใช้จนกว่าจะมี GitHub App ในแผน 3 |
 
@@ -112,12 +112,15 @@ nano .env
 ## 4. เริ่มระบบ
 
 ```bash
-sudo docker compose up -d --build
+sudo docker compose build worker && sudo docker compose build web   # ทีละ image (อ่านเหตุผลด้านล่าง)
+sudo docker compose up -d
 sudo docker compose ps
 sudo docker compose logs worker
 ```
 
-ผลที่ถูกต้อง: `postgres` เป็น `healthy`, `traefik` เป็น `running`, `worker` เป็น `healthy` (หลัง migrate และกู้งานค้างเสร็จ) และ `web` เป็น `healthy`; log ของ worker มี `buildx: vpsm-builder`, `recovery: 0 interrupted deployment(s) …` และ `worker started` โดยไม่มีบรรทัด error (การ migrate ฐานข้อมูลทำเองตอน worker เริ่ม) `web` จะไม่เริ่มจนกว่า `worker` จะ `healthy` การ build image ของ `web` ครั้งแรกใช้เวลาหลายนาทีและใช้ RAM ชั่วคราวระหว่าง `next build` จึงควรทำตอนไม่มี deployment กำลัง build
+**บน VPS 8 GB ให้ build image ทีละตัวก่อน `up -d` อย่างข้างบน** เพราะ `docker compose up -d --build` (และ `docker compose build` เฉยๆ) build หลาย image พร้อมกัน ส่วน `next build` ของ `web` ใช้ RAM มากอยู่แล้ว (ยังไม่ได้วัดบน VPS จริง) ถ้ามาซ้อนกับการ build ของ worker และแอปที่รันอยู่ kernel อาจ kill process (ดูหัวข้อ "หน่วยความจำและ swap") `up -d` ที่ไม่มี `--build` ใช้ image ที่ build ไว้แล้ว
+
+ผลที่ถูกต้อง: `postgres` เป็น `healthy`, `traefik` เป็น `running`, `worker` เป็น `healthy` (หลัง migrate และกู้งานค้างเสร็จ) และ `web` เป็น `healthy`; log ของ worker มี `buildx: vpsm-builder`, `recovery: 0 interrupted deployment(s) …` และ `worker started` โดยไม่มีบรรทัด error (การ migrate ฐานข้อมูลทำเองตอน worker เริ่ม) `web` จะไม่เริ่มจนกว่า `worker` จะ `healthy` การ build image ของ `web` ครั้งแรกใช้เวลาหลายนาที จึงควรทำตอนไม่มี deployment กำลัง build
 
 worker ลงทะเบียน builder `vpsm-builder` (จำกัด memory 3 GB และ CPU 3 core) **ตอนเริ่มทำงาน** ไม่ใช่ตอน build ครั้งแรก บรรทัด `buildx: vpsm-builder` คือผลของการลงทะเบียนนี้ และจะปรากฏอีกทุกครั้งที่ container ของ worker ถูกสร้างใหม่ (ตรวจได้ด้วย `sudo docker compose exec worker docker buildx ls`) ส่วน container ของ BuildKit จะเริ่มจริงตอน build ครั้งแรก
 
@@ -166,11 +169,15 @@ curl -s https://hello-demo.apps.example.com/
 
 ```bash
 cd vps-management
-git pull && sudo docker compose up -d --build
+git pull
+sudo docker compose build worker && sudo docker compose build web
+sudo docker compose up -d
 ```
 
+บน VPS 8 GB ให้ build ทีละ image อย่างข้างบน (เหตุผลอยู่ในหัวข้อ 4) ถ้าเครื่องมี RAM เหลือเฟือจะใช้ `git pull && sudo docker compose up -d --build` ทีเดียวก็ได้
+
 - แอปของผู้ใช้เป็น container แยก จึงยังรันต่อระหว่างอัปเดต
-- ถ้า `sudo docker compose up -d --build` สร้าง Traefik ใหม่ (เช่น เปลี่ยน image หรือ config) container ใหม่จะหลุดจาก network ของแอปทุกตัว worker จะต่อ Traefik กลับเข้า network ของแอปที่ live อยู่ให้เองภายในประมาณ 60 วินาที (และตอน worker เริ่มทำงาน) ช่วงนั้นเว็บอาจตอบ 502 หรือ 404 สั้นๆ ไม่ต้อง deploy ใหม่
+- ถ้า `sudo docker compose up -d` สร้าง Traefik ใหม่ (เช่น เปลี่ยน image หรือ config) container ใหม่จะหลุดจาก network ของแอปทุกตัว worker จะต่อ Traefik กลับเข้า network ของแอปที่ live อยู่ให้เองภายในประมาณ 60 วินาที (และตอน worker เริ่มทำงาน) ช่วงนั้นเว็บอาจตอบ 502 หรือ 404 สั้นๆ ไม่ต้อง deploy ใหม่
 - ถ้าอัปเดตขณะมี deployment กำลัง build อยู่ worker จะถูกสร้างใหม่: worker เก่ารอให้ deployment นั้นทำเสร็จได้นานสุด 50 วินาที ถ้ายังไม่เสร็จ deployment นั้นจะถูกตั้งเป็น `FAILED` (`worker restarted during deployment`) ให้สั่ง `deploy <project> <service>` ใหม่หลัง worker กลับมา ควรอัปเดตตอนไม่มีงานค้าง (ดูด้วย `status <project>`)
 - `sudo docker compose down` ไม่ลบข้อมูล แต่ **`docker compose down -v` ลบ volume ทั้งหมดรวมฐานข้อมูลและใบรับรอง** ห้ามใช้บน VPS จริง
 
@@ -232,14 +239,16 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
 
 1. ตรวจว่า DNS ชี้มาที่ VPS: `dig +short panel.<APPS_DOMAIN>` ต้องได้ IP ของ VPS
 2. เพิ่ม `PANEL_DOMAIN=panel.<APPS_DOMAIN>` ใน `.env` (สำหรับ VPS นี้ `PANEL_DOMAIN=panel.itexcellence.duckdns.org`)
-3. ดึงโค้ดและสร้างใหม่ (ต้องมี `--build` เสมอ เพราะต้อง build image ของ worker ที่รู้จัก panel และ image ของ `web`):
+3. ดึงโค้ดและ build ใหม่ (ต้อง build เสมอ เพราะต้องมี image ของ worker ที่รู้จัก panel และ image ของ `web`) บน VPS 8 GB ให้ build ทีละ image ก่อน `up -d` (เหตุผลอยู่ในหัวข้อ 4):
 
    ```bash
    cd vps-management
-   git pull && sudo docker compose up -d --build
+   git pull
+   sudo docker compose build worker && sudo docker compose build web
+   sudo docker compose up -d
    ```
 
-   แอปของผู้ใช้เป็น container แยก จึงยังรันต่อระหว่างนี้ worker ถูกสร้างใหม่ (หัวข้อ 7 อธิบายกรณีมี deployment ค้าง)
+   (ถ้าเครื่องมี RAM เหลือเฟือ `git pull && sudo docker compose up -d --build` ทีเดียวก็ได้) แอปของผู้ใช้เป็น container แยก จึงยังรันต่อระหว่างนี้ worker ถูกสร้างใหม่ (หัวข้อ 7 อธิบายกรณีมี deployment ค้าง)
 4. รอจน worker เป็น `healthy` แล้ว `web` ก็เริ่มและเป็น `healthy`:
 
    ```bash
@@ -325,22 +334,27 @@ sudo docker compose exec worker node dist/cli.js user:reset-password you@example
 
 3. เปิด port 8443 (TCP) ที่ firewall / security group ของผู้ให้บริการ VPS port ที่ Docker เปิดจะข้ามกฎของ ufw ดังนั้น `sudo ufw allow 8443/tcp` ไม่เป็นอันตรายแต่ไม่พอ และไม่ใช่สิ่งที่ตัดสินว่าเข้าถึงได้หรือไม่
 
-4. สลับระบบ ต้องมี `--build` เสมอ เพราะ `up -d` เฉยๆ ไม่ build worker ใหม่ worker เก่าจึงไม่รู้จักโหมดนี้
+4. สลับระบบ ต้อง build ใหม่เสมอ เพราะ `up -d` เฉยๆ ไม่ build worker ใหม่ worker เก่าจึงไม่รู้จักโหมดนี้ (บน VPS 8 GB ให้ build ทีละ image ตามหัวข้อ 4)
    - ติดตั้งใหม่ ยังไม่มีแอปที่ live:
 
      ```bash
-     sudo docker compose up -d --build
+     sudo docker compose build worker && sudo docker compose build web
+     sudo docker compose up -d
      ```
 
    - มีแอปที่ live อยู่แล้ว ให้อัปเดต worker ก่อน เพื่อให้ไฟล์ route ถูกเขียนใหม่ในรูปแบบ wildcard ก่อนที่ Traefik ตัวใหม่จะอ่าน (ไม่เช่นนั้น Traefik จะอ่านไฟล์ route เก่าแล้วสั่งขอใบรับรองด้วย DNS challenge ทีละชื่อ):
 
      ```bash
-     sudo docker compose up -d --build worker
+     sudo docker compose build worker && sudo docker compose build web
+     sudo docker compose up -d worker
      sudo docker compose logs worker      # รอจนเห็นบรรทัด worker started
      sudo docker compose up -d traefik
+     sudo docker compose up -d            # สร้าง web ใหม่ด้วย PUBLIC_HTTPS_PORT ใหม่
      ```
 
      ตอน worker เริ่มทำงานจะเขียน route ของแอปที่ live อยู่ใหม่เอง ไม่ต้อง deploy ใหม่ ช่วงสลับเว็บอาจเข้าไม่ได้สั้นๆ
+
+     คำสั่ง `sudo docker compose up -d` ตัวสุดท้าย **ห้ามข้าม**: ไฟล์ override เปลี่ยน `PUBLIC_HTTPS_PORT` ของ `web` จาก 443 เป็น 8443 `web` ที่รันอยู่จึงต้องถูกสร้างใหม่ ไม่เช่นนั้นมันจะยังเทียบ header `Origin` กับ `https://<PANEL_DOMAIN>` ที่ไม่มี `:8443` และทุกการล็อกอิน/กดปุ่มใน panel จะถูกปฏิเสธด้วย `cross-origin request refused`
 
 5. ตรวจผล:
 
@@ -353,4 +367,4 @@ sudo docker compose exec worker node dist/cli.js user:reset-password you@example
 
    ใบรับรอง wildcard ถูกสั่งขอตอนที่ route ของแอปแรกถูกโหลดเข้า Traefik ไม่ใช่ตอน Traefik เริ่มทำงาน ดังนั้นบรรทัด `==> Live at https://…:8443` ใน log ของ deployment อาจขึ้นก่อนที่ใบรับรองจะออก การขอด้วย DNS challenge อาจใช้เวลาประมาณ 1–2 นาที (ยังไม่ได้ยืนยันบน VPS จริง) ระหว่างนั้น browser จะเห็นใบรับรองเริ่มต้นของ Traefik ซึ่งไม่น่าเชื่อถือ ให้รอแล้วลองเปิดใหม่ ถ้านานกว่านั้นให้ดู `sudo docker compose logs traefik` หาบรรทัด error ที่เกี่ยวกับ `acme` หรือ `duckdns` และตรวจว่า token ถูกต้องและ `APPS_DOMAIN` เป็นชื่อที่ token นั้นเป็นเจ้าของ
 
-การอัปเดตครั้งต่อไปใช้ตามหัวข้อ 7 ได้ตามเดิม (`git pull && sudo docker compose up -d --build`)
+การอัปเดตครั้งต่อไปใช้ตามหัวข้อ 7 ได้ตามเดิม (`git pull`, build ทีละ image แล้ว `sudo docker compose up -d`)

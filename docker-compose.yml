@@ -114,9 +114,17 @@ services:
     mem_reservation: 128m
     oom_score_adj: -900
     logging: *logging
-    env_file: .env
+    # No env_file: the dashboard faces the internet, so it gets exactly the settings it reads (apps/web/src/server/
+    # config.ts and limits.ts) and not the whole .env, which also holds GITHUB_TOKEN, the database password and more.
+    # The values come from .env (or the shell) through Compose's own interpolation; docker-compose.dns-tls.yml
+    # overrides PUBLIC_HTTPS_PORT. Do not add a variable here unless the dashboard reads it.
     environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      APPS_DOMAIN: ${APPS_DOMAIN:?set APPS_DOMAIN in .env}
       PANEL_DOMAIN: ${PANEL_DOMAIN:?set PANEL_DOMAIN in .env (for example panel.apps.example.com)}
+      PUBLIC_HTTPS_PORT: ${PUBLIC_HTTPS_PORT:-443}
+      MEMORY_BUDGET_MB: ${MEMORY_BUDGET_MB:-5632}
+      MAX_SERVICE_MEMORY_MB: ${MAX_SERVICE_MEMORY_MB:-2048}
     depends_on:
       postgres:
         condition: service_healthy
