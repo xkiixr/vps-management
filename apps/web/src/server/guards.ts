@@ -1,0 +1,52 @@
+import { cookies } from 'next/headers'
+import { notFound, redirect } from 'next/navigation'
+import { cache } from 'react'
+import type { SafeUser } from '@vpsm/db'
+import { getDb } from './db'
+import { type CookieJar, resolveSessionUser } from './session'
+
+export function ensureUser(user: SafeUser | null): SafeUser {
+  if (!user) redirect('/login')
+  return user
+}
+
+// A member gets the ordinary 404: nothing tells them an admin page is there.
+export function ensureAdmin(user: SafeUser): SafeUser {
+  if (user.role !== 'admin') notFound()
+  return user
+}
+
+// Next's cookie store for this request. It is writable in server actions and route handlers only; a Server
+// Component render refuses Set-Cookie, so a renewal noticed there cannot update the cookie. That is fine: for page
+// loads proxy.ts has already renewed the session (and its cookie) before rendering starts.
+async function requestCookies(): Promise<CookieJar> {
+  const store = await cookies()
+  return {
+    get: (name) => store.get(name),
+    set(name, value, options) {
+      try {
+        store.set(name, value, options)
+      } catch {
+        // Read-only during a Server Component render (see above).
+      }
+    },
+  }
+}
+
+/** The signed-in user, or null. Memoised per request, so a layout and its page share one lookup. */
+export const currentUser = cache(async (): Promise<SafeUser | null> => {
+  // Cookies first: reading them is what marks the page as rendered per request (never prerendered at build time,
+  // when there is no database to connect to).
+  const jar = await requestCookies()
+  return resolveSessionUser(getDb(), jar)
+})
+
+/** The signed-in user; anyone else is redirected to /login. */
+export async function requireUser(): Promise<SafeUser> {
+  return ensureUser(await currentUser())
+}
+
+/** The signed-in admin; members get a 404 and anyone not signed in is redirected to /login. */
+export async function requireAdmin(): Promise<SafeUser> {
+  return ensureAdmin(await requireUser())
+}
