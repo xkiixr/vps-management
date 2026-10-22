@@ -13,7 +13,7 @@ const CERT_RESOLVER = 'le'
 // These values come from the database but end up inside Traefik config (keys, rules, urls),
 // so anything that could alter the structure of that config is refused.
 const SERVICE_INSTANCE_ID_PATTERN = /^[a-z0-9-]+$/
-const UPSTREAM_URL_PATTERN = /^http:\/\/[a-z0-9-]+:[0-9]+$/
+export const UPSTREAM_URL_PATTERN = /^http:\/\/[a-z0-9-]+:[0-9]+$/
 
 export function validateRoute(route: Route): void {
   if (!SERVICE_INSTANCE_ID_PATTERN.test(route.serviceInstanceId)) {

@@ -6,6 +6,7 @@ import {
   containerName,
   type DeployConfig,
   type DeploymentStatus,
+  type DeploymentTrigger,
   imageTag,
   networkName,
   privateHostname,
@@ -28,6 +29,7 @@ import { BuildError } from '../build/errors'
 import type { railpackPrepare } from '../build/railpack'
 import type { WorkerConfig } from '../config'
 import type { LineHandler, RunCommand } from '../exec'
+import { effectiveResourceLimits } from '../resource-limits'
 import { buildContainerSpec, resourceLimitError } from '../runtime/container-spec'
 import type { DockerRuntime } from '../runtime/docker-runtime'
 import { type HealthMode, healthMode, type waitHealthy } from '../runtime/healthcheck'
@@ -83,7 +85,13 @@ type Job = {
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 /**
- * Builds (or, for a rollback, reuses) the image, starts it next to the live container, waits until it is
+ * A rollback runs the image of an earlier deployment again; a restart is the same thing with the live
+ * deployment as that earlier one. Neither fetches or builds anything.
+ */
+const reusesImage = (trigger: DeploymentTrigger) => trigger === 'rollback' || trigger === 'restart'
+
+/**
+ * Builds (or, for a rollback or restart, reuses) the image, starts it next to the live container, waits until it is
  * healthy, switches the routes to it and only then retires the old one. Never throws: any failure before
  * the switch leaves the old container untouched, removes the new one and marks the deployment FAILED.
  */
@@ -130,7 +138,7 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
 }
 
 async function execute(job: Job): Promise<void> {
-  const target = job.ctx.deployment.trigger === 'rollback' ? rollbackTarget(job.ctx) : undefined
+  const target = reusesImage(job.ctx.deployment.trigger) ? rollbackTarget(job.ctx) : undefined
   await checkResources(job, target?.snapshot.deploy ?? job.ctx.instance.deploy)
   const image = target ? await startRollback(job, target) : await buildPhase(job)
   const name = await runPhase(job, image)
@@ -148,13 +156,15 @@ async function checkResources(job: Job, deploy: DeployConfig): Promise<void> {
   const invalid = resourceLimitError(deploy)
   if (invalid !== undefined) throw new DeploymentFailure(invalid)
 
-  const { docker, config } = job.deps
+  const { db, docker, config } = job.deps
+  // Read for every deployment: an admin can change the limits from the dashboard at any time.
+  const { memoryBudgetMb, maxServiceMemoryMb } = await effectiveResourceLimits(db, config)
   const running = (await docker.listManaged()).filter((c) => c.running).map((c) => c.memoryMb)
   const budget = checkMemoryBudget({
     runningMb: running,
     newMb: deploy.memoryLimitMB,
-    budgetMb: config.memoryBudgetMb,
-    maxServiceMb: config.maxServiceMemoryMb,
+    budgetMb: memoryBudgetMb,
+    maxServiceMb: maxServiceMemoryMb,
   })
   if (!budget.ok) throw new DeploymentFailure(budget.reason)
 }
@@ -175,7 +185,8 @@ async function startRollback(job: Job, target: RollbackTarget): Promise<Image> {
   if (!(await job.deps.docker.imageExists(target.tag))) {
     throw new DeploymentFailure('image for rollback target no longer exists')
   }
-  job.log('deploy', `==> Rolling back to deployment ${target.source.id.slice(0, 8)} (image ${target.tag})`)
+  const verb = job.ctx.deployment.trigger === 'restart' ? 'Restarting' : 'Rolling back to'
+  job.log('deploy', `==> ${verb} deployment ${target.source.id.slice(0, 8)} (image ${target.tag})`)
   await transition(job, 'DEPLOYING', {
     imageTag: target.tag,
     configSnapshot: target.source.configSnapshot,

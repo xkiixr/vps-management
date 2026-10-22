@@ -135,6 +135,11 @@ sudo docker compose exec worker node dist/cli.js <คำสั่ง>
 | `restart <project> <service>` | restart container ที่ live อยู่ |
 | `status <project>` | แสดงทุก service: ชื่อ สถานะของ deployment ล่าสุด และ URL |
 | `logs <deploymentId>` | แสดง log ของ deployment (ทั้งตอน build และ deploy) |
+| `user:create <email> --name <name> [--admin]` | สร้างบัญชีผู้ใช้ของเว็บ (ค่าเริ่มต้นเป็น member, `--admin` สำหรับ admin) พิมพ์รหัสผ่านที่สร้างให้ **ครั้งเดียว** แล้วไม่แสดงอีก |
+| `user:reset-password <email>` | ตั้งรหัสผ่านใหม่ พิมพ์รหัสใหม่ครั้งเดียว และออกจากระบบทุก session ของผู้ใช้นั้น |
+| `user:list` | แสดงผู้ใช้ทั้งหมด: อีเมล บทบาท และ `active`/`disabled` |
+
+ทุกคำสั่งที่แก้ข้อมูลบันทึก audit event (ผู้กระทำเป็นว่าง, `via: cli`) ถ้าบันทึกไม่สำเร็จ คำสั่งยังถือว่าสำเร็จและมีคำเตือนขึ้นที่ stderr
 
 สถานะ deployment มีแค่ `QUEUED`, `BUILDING`, `DEPLOYING`, `SUCCESS`, `FAILED`, `CRASHED`, `REMOVED`, `SKIPPED` ระบบ build ทีละงานเท่านั้น งานที่เข้าคิวซ้อนกันของ service เดียวกันจะรอ และตัวที่ถูกแทนที่จะเป็น `SKIPPED`
 

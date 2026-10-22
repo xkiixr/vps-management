@@ -1,21 +1,28 @@
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { and, asc, desc, eq, isNotNull } from 'drizzle-orm'
-import { type DeploymentTrigger, publicUrl } from '@vpsm/core'
+import { type DeploymentTrigger, MIN_MEMORY_MB, publicUrl } from '@vpsm/core'
 import {
+  type AuditEntry,
   createAppService,
   createDb,
   createProject,
+  createUser,
   type Db,
   deploymentLogs,
   deployments,
   enqueueDeployment,
   findServiceInstance,
+  generatePassword,
+  listUsers,
   projects,
+  recordAudit,
   services,
+  setPassword,
+  users,
 } from '@vpsm/db'
 import { loadConfig, type WorkerConfig } from './config'
-import { MIN_MEMORY_MB } from './runtime/container-spec'
+import { effectiveResourceLimits } from './resource-limits'
 import { createDockerRuntime, type DockerRuntime } from './runtime/docker-runtime'
 
 export type CliDeps = { db: Db; docker: DockerRuntime; config: WorkerConfig; out: (line: string) => void }
@@ -33,6 +40,8 @@ const OPTIONS = {
   port: { type: 'string' },
   memory: { type: 'string' },
   start: { type: 'string' },
+  name: { type: 'string' },
+  admin: { type: 'boolean' },
   help: { type: 'boolean' },
 } as const
 
@@ -68,14 +77,30 @@ async function requireInstance(db: Db, project: string, service: string) {
 async function enqueue(c: Context, serviceInstanceId: string, trigger: DeploymentTrigger, rollbackOfId?: string) {
   const queued = await enqueueDeployment(c.db, { serviceInstanceId, trigger, rollbackOfId })
   c.out(`queued deployment ${queued.id}`)
+  return queued
+}
+
+/**
+ * Records what the operator just did. The action itself has already succeeded, so a failure here is only
+ * warned about: it must not turn the command into a failure (or hide a password that was just created).
+ * `metadata` is stored for good: identifiers only, never a password or token.
+ */
+async function audit(c: Context, entry: Omit<AuditEntry, 'actorId'>): Promise<void> {
+  try {
+    await recordAudit(c.db, { ...entry, actorId: null, metadata: { via: 'cli', ...entry.metadata } })
+  } catch (error) {
+    console.error(`warning: could not record the audit event: ${messageOf(error)}`)
+  }
 }
 
 const COMMANDS: Record<string, Command> = {
   'project:create': {
     args: ['project'],
-    async run({ db, out, args: [project] }) {
-      await createProject(db, project!)
-      out(`created project ${project}`)
+    async run(c) {
+      const [name] = c.args
+      const project = await createProject(c.db, name!)
+      c.out(`created project ${name}`)
+      await audit(c, { action: 'project.create', targetType: 'project', targetId: project.id, metadata: { name } })
     },
   },
 
@@ -92,11 +117,12 @@ const COMMANDS: Record<string, Command> = {
       const memory = positiveInt('--memory', c.flags.memory)
       if (port !== undefined && port > MAX_PORT) throw new CliError(`--port must be at most ${MAX_PORT}`)
       if (memory !== undefined && memory < MIN_MEMORY_MB) throw new CliError(`--memory must be at least ${MIN_MEMORY_MB}`)
-      if (memory !== undefined && memory > c.config.maxServiceMemoryMb) {
-        throw new CliError(`--memory exceeds the per-service max of ${c.config.maxServiceMemoryMb} MB`)
+      if (memory !== undefined) {
+        const { maxServiceMemoryMb } = await effectiveResourceLimits(c.db, c.config)
+        if (memory > maxServiceMemoryMb) throw new CliError(`--memory exceeds the per-service max of ${maxServiceMemoryMb} MB`)
       }
 
-      const { instance, domain } = await createAppService(c.db, {
+      const { service: created, instance, domain } = await createAppService(c.db, {
         projectName: project!,
         serviceName: service!,
         source: { repo, branch, ...(root === undefined ? {} : { rootDirectory: root }) },
@@ -104,6 +130,7 @@ const COMMANDS: Record<string, Command> = {
         appsDomain: c.config.appsDomain,
       })
       c.out(publicUrl(domain.hostname, c.config.publicHttpsPort))
+      await audit(c, { action: 'service.create', targetType: 'service', targetId: created.id, metadata: { project, service } })
       await enqueue(c, instance.id, 'manual')
     },
   },
@@ -111,8 +138,10 @@ const COMMANDS: Record<string, Command> = {
   deploy: {
     args: ['project', 'service'],
     async run(c) {
-      const { instance } = await requireInstance(c.db, c.args[0]!, c.args[1]!)
-      await enqueue(c, instance.id, 'manual')
+      const [project, service] = c.args as [string, string]
+      const { instance } = await requireInstance(c.db, project, service)
+      const queued = await enqueue(c, instance.id, 'manual')
+      await audit(c, { action: 'deployment.deploy', targetType: 'deployment', targetId: queued.id, metadata: { project, service } })
     },
   },
 
@@ -129,16 +158,23 @@ const COMMANDS: Record<string, Command> = {
         : []
       if (!target) throw new CliError(`deployment does not belong to ${project}/${service}`)
       if (!target.imageTag) throw new CliError(`deployment ${id} has no image to roll back to`)
-      await enqueue(c, instance.id, 'rollback', target.id)
+      const queued = await enqueue(c, instance.id, 'rollback', target.id)
+      await audit(c, {
+        action: 'deployment.rollback',
+        targetType: 'deployment',
+        targetId: queued.id,
+        metadata: { project, service, rollbackOfId: target.id },
+      })
     },
   },
 
   restart: {
     args: ['project', 'service'],
-    async run({ db, docker, out, args: [project, service] }) {
-      const { instance } = await requireInstance(db, project!, service!)
-      const [live] = await db
-        .select({ containerName: deployments.containerName })
+    async run(c) {
+      const [project, service] = c.args as [string, string]
+      const { instance } = await requireInstance(c.db, project, service)
+      const [live] = await c.db
+        .select({ id: deployments.id, containerName: deployments.containerName })
         .from(deployments)
         .where(
           and(
@@ -150,8 +186,9 @@ const COMMANDS: Record<string, Command> = {
         .orderBy(desc(deployments.createdAt), desc(deployments.id))
         .limit(1)
       if (!live?.containerName) throw new CliError(`${project}/${service} has no running deployment`)
-      await docker.restart(live.containerName)
-      out(`restarted ${project}/${service}`)
+      await c.docker.restart(live.containerName)
+      c.out(`restarted ${project}/${service}`)
+      await audit(c, { action: 'deployment.restart', targetType: 'deployment', targetId: live.id, metadata: { project, service } })
     },
   },
 
@@ -179,6 +216,43 @@ const COMMANDS: Record<string, Command> = {
         const domain = details?.domains.find((d) => d.kind === 'generated')
         out(`${name}  ${latest?.status ?? '-'}  ${domain ? publicUrl(domain.hostname, config.publicHttpsPort) : '-'}`)
       }
+    },
+  },
+
+  'user:create': {
+    args: ['email'],
+    flags: '--name <name> [--admin]',
+    async run(c) {
+      const { name, admin } = c.flags
+      if (name === undefined) throw new UsageError('--name is required')
+      const role = admin ? 'admin' : 'member'
+      const password = generatePassword()
+      const user = await createUser(c.db, { email: c.args[0]!, name, role, password })
+      // The only place the password is ever shown; it is not stored anywhere in clear.
+      c.out(`created user ${user.email} (${user.role})`)
+      c.out(`password: ${password}`)
+      await audit(c, { action: 'user.create', targetType: 'user', targetId: user.id, metadata: { email: user.email, role: user.role } })
+    },
+  },
+
+  'user:reset-password': {
+    args: ['email'],
+    async run(c) {
+      const email = c.args[0]!.trim().toLowerCase()
+      const [user] = await c.db.select({ id: users.id, email: users.email }).from(users).where(eq(users.email, email))
+      if (!user) throw new CliError(`user ${email} not found`)
+      const password = generatePassword()
+      await setPassword(c.db, user.id, password)
+      c.out(`reset password for ${user.email}`)
+      c.out(`password: ${password}`)
+      await audit(c, { action: 'user.reset_password', targetType: 'user', targetId: user.id, metadata: { email: user.email } })
+    },
+  },
+
+  'user:list': {
+    args: [],
+    async run({ db, out }) {
+      for (const user of await listUsers(db)) out(`${user.email}  ${user.role}  ${user.disabledAt === null ? 'active' : 'disabled'}`)
     },
   },
 

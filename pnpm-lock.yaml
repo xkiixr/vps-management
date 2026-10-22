@@ -178,6 +178,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@node-rs/argon2':
+        specifier: ^2.2.2
+        version: 2.2.2
       '@vpsm/core':
         specifier: workspace:*
         version: link:../../packages/core

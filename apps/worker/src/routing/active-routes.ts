@@ -8,6 +8,11 @@ function deployPort(configSnapshot: unknown): number | undefined {
   return typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65535 ? port : undefined
 }
 
+const PANEL_RESERVED_REASON = 'hostname is reserved for the panel'
+
+/** The router key of the panel; it cannot clash with a service instance id, which is a UUID. */
+const PANEL_ROUTE_ID = 'panel'
+
 export type OnInvalidRoute = (serviceInstanceId: string, reason: string) => void
 
 const warnInvalidRoute: OnInvalidRoute = (serviceInstanceId, reason) => {
@@ -18,7 +23,12 @@ const warnInvalidRoute: OnInvalidRoute = (serviceInstanceId, reason) => {
 // Normally an instance has a single SUCCESS deployment; if a stale one lingers, the newest wins.
 // A route that cannot be rendered safely (no valid port, bad hostname, ...) is skipped and reported
 // through `onInvalid`, so one bad row never takes routing down for every other service.
-export async function loadActiveRoutes(db: Db, onInvalid: OnInvalidRoute = warnInvalidRoute): Promise<Route[]> {
+// An instance that has `panelDomain` among its hostnames is skipped as a whole: that name belongs to the panel.
+export async function loadActiveRoutes(
+  db: Db,
+  onInvalid: OnInvalidRoute = warnInvalidRoute,
+  panelDomain?: string,
+): Promise<Route[]> {
   const live = await db
     .selectDistinctOn([deployments.serviceInstanceId], {
       id: deployments.id,
@@ -51,6 +61,10 @@ export async function loadActiveRoutes(db: Db, onInvalid: OnInvalidRoute = warnI
     const { serviceInstanceId } = deployment
     const hostnames = hostnamesByInstance.get(serviceInstanceId)
     if (hostnames === undefined) continue
+    if (panelDomain !== undefined && hostnames.some((hostname) => hostname.toLowerCase() === panelDomain.toLowerCase())) {
+      onInvalid(serviceInstanceId, PANEL_RESERVED_REASON)
+      continue
+    }
     const port = deployPort(deployment.configSnapshot)
     if (port === undefined) {
       onInvalid(serviceInstanceId, `deployment ${deployment.id} has no valid deploy.port in its config snapshot`)
@@ -68,6 +82,15 @@ export async function loadActiveRoutes(db: Db, onInvalid: OnInvalidRoute = warnI
   return routes
 }
 
-export async function regenerateRoutes(db: Db, dir: string, onInvalid?: OnInvalidRoute, tls?: RoutesTls): Promise<void> {
-  await writeRoutesFile(dir, renderRoutesYaml(await loadActiveRoutes(db, onInvalid), { tls }))
+/** With `panel`, the dashboard is routed too (even when no app is live) and no app can use its hostname. */
+export async function regenerateRoutes(
+  db: Db,
+  dir: string,
+  onInvalid?: OnInvalidRoute,
+  tls?: RoutesTls,
+  panel?: { domain: string; upstream: string },
+): Promise<void> {
+  const routes = await loadActiveRoutes(db, onInvalid, panel?.domain)
+  if (panel) routes.unshift({ serviceInstanceId: PANEL_ROUTE_ID, hostnames: [panel.domain], upstreamUrl: panel.upstream })
+  await writeRoutesFile(dir, renderRoutesYaml(routes, { tls }))
 }

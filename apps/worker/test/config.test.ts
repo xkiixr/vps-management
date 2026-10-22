@@ -28,6 +28,7 @@ test('every default', () => {
     workDir: '/var/lib/vpsm/work',
     tlsMode: 'http01',
     publicHttpsPort: 443,
+    panelUpstream: 'http://vpsm-web:3000',
   })
 })
 
@@ -48,6 +49,8 @@ test('reads every variable from the environment', () => {
       TLS_MODE: 'dns-wildcard',
       PUBLIC_HTTPS_PORT: '8443',
       GITHUB_TOKEN: 'ghs_abc',
+      PANEL_DOMAIN: 'panel.paas.duckdns.org',
+      PANEL_UPSTREAM: 'http://my-web:4000',
     }),
   ).toEqual({
     appsDomain: 'paas.duckdns.org',
@@ -64,6 +67,8 @@ test('reads every variable from the environment', () => {
     tlsMode: 'dns-wildcard',
     publicHttpsPort: 8443,
     githubToken: 'ghs_abc',
+    panelDomain: 'panel.paas.duckdns.org',
+    panelUpstream: 'http://my-web:4000',
   })
 })
 
@@ -156,6 +161,65 @@ describe('the TLS settings only make sense together', () => {
     }
     expect(message).toMatch(/PUBLIC_HTTPS_PORT/)
     expect(message).not.toContain('9999')
+  })
+})
+
+describe('the panel settings', () => {
+  const load = (env: Record<string, string>) => () => loadConfig({ APPS_DOMAIN: 'apps.example.com', ...env })
+
+  test('the panel is optional and its upstream defaults to the web container', () => {
+    const config = load({})()
+    expect(config.panelDomain).toBeUndefined()
+    expect('panelDomain' in config).toBe(false)
+    expect(config.panelUpstream).toBe('http://vpsm-web:3000')
+  })
+
+  test('PANEL_DOMAIN is read as given', () => {
+    expect(load({ PANEL_DOMAIN: 'panel.apps.example.com' })().panelDomain).toBe('panel.apps.example.com')
+  })
+
+  test('an empty PANEL_DOMAIN or PANEL_UPSTREAM counts as unset', () => {
+    const config = load({ PANEL_DOMAIN: '', PANEL_UPSTREAM: '' })()
+    expect(config.panelDomain).toBeUndefined()
+    expect(config.panelUpstream).toBe('http://vpsm-web:3000')
+  })
+
+  test.each(['Bad Host', 'Panel.Example.com', 'localhost', 'panel..example.com', 'https://panel.example.com'])(
+    'PANEL_DOMAIN %s must be a valid hostname',
+    (domain) => {
+      expect(load({ PANEL_DOMAIN: domain })).toThrow(/^invalid worker configuration: PANEL_DOMAIN /)
+    },
+  )
+
+  test.each([
+    'vpsm-web:3000',
+    'https://vpsm-web:3000',
+    'http://vpsm-web',
+    'http://vpsm-web:3000/',
+    'http://vpsm-web:3000/app',
+    'http://VPSM-web:3000',
+    'http://vpsm_web:3000',
+    'http://user@vpsm-web:3000',
+    'http://vpsm-web:port',
+  ])('PANEL_UPSTREAM %s is rejected', (upstream) => {
+    expect(load({ PANEL_UPSTREAM: upstream })).toThrow(/^invalid worker configuration: PANEL_UPSTREAM /)
+  })
+
+  test('PANEL_UPSTREAM accepts a container name and port', () => {
+    expect(load({ PANEL_UPSTREAM: 'http://panel-1:8080' })().panelUpstream).toBe('http://panel-1:8080')
+  })
+
+  test('the errors name the variable without echoing its value', () => {
+    for (const env of [{ PANEL_DOMAIN: 'Secretish Host' }, { PANEL_UPSTREAM: 'http://secretish_host:3000' }]) {
+      let message = ''
+      try {
+        loadConfig({ APPS_DOMAIN: 'apps.example.com', ...env })
+      } catch (error) {
+        message = (error as Error).message
+      }
+      expect(message).toMatch(/PANEL_/)
+      expect(message).not.toContain('ecretish')
+    }
   })
 })
 

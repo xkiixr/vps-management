@@ -1,4 +1,4 @@
-import type { DeployConfig } from '@vpsm/core'
+import { type DeployConfig, MIN_MEMORY_MB } from '@vpsm/core'
 import type Dockerode from 'dockerode'
 
 export const MANAGED_LABEL = 'vpsm.managed'
@@ -8,7 +8,6 @@ export const MEMORY_LABEL = 'vpsm.memory-mb'
 
 const MIB = 1024 * 1024
 const PIDS_LIMIT = 512
-export const MIN_MEMORY_MB = 6 // Docker refuses less
 const MIN_NANO_CPUS = 1e7 // 0.01 CPU
 /**
  * When the host runs out of memory the kernel kills user apps (and builds) before the control plane:

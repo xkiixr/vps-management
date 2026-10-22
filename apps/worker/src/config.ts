@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { z } from 'zod'
 import { isValidHostname } from '@vpsm/core'
+import { UPSTREAM_URL_PATTERN } from './routing/traefik-config'
 
 export type WorkerConfig = {
   appsDomain: string
@@ -19,6 +20,10 @@ export type WorkerConfig = {
   /** The host port that reaches Traefik's HTTPS entrypoint; it only ends up in the URLs the worker prints. */
   publicHttpsPort: number
   githubToken?: string
+  /** The hostname of the web dashboard. Without it the worker does not route to the panel at all. */
+  panelDomain?: string
+  /** Where Traefik reaches the web dashboard: a container name on the shared network and its port. */
+  panelUpstream: string
 }
 
 const text = (fallback: string) => z.string().default(fallback)
@@ -56,6 +61,9 @@ const fields = z.object({
   TLS_MODE: z.enum(['http01', 'dns-wildcard']).default('http01'),
   PUBLIC_HTTPS_PORT: z.coerce.number().int().min(1).max(65535).default(443),
   GITHUB_TOKEN: z.string().optional(),
+  PANEL_DOMAIN: z.string().refine(isValidHostname, 'must be a lowercase hostname such as panel.apps.example.com').optional(),
+  // Ends up in the Traefik config, so only `http://<container name>:<port>` is accepted.
+  PANEL_UPSTREAM: text('http://vpsm-web:3000').refine((url) => UPSTREAM_URL_PATTERN.test(url), 'must look like http://vpsm-web:3000'),
 })
 
 const DUCKDNS_SUFFIX = '.duckdns.org'
@@ -99,5 +107,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     tlsMode: e.TLS_MODE,
     publicHttpsPort: e.PUBLIC_HTTPS_PORT,
     ...(e.GITHUB_TOKEN === undefined ? {} : { githubToken: e.GITHUB_TOKEN }),
+    ...(e.PANEL_DOMAIN === undefined ? {} : { panelDomain: e.PANEL_DOMAIN }),
+    panelUpstream: e.PANEL_UPSTREAM,
   }
 }

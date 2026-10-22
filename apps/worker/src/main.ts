@@ -34,6 +34,8 @@ async function main(): Promise<void> {
   const { db, sql, close } = createDb(databaseUrl)
   const docker = createDockerRuntime()
   await ensureBuilder(runCommand, (line) => console.log(`buildx: ${line}`))
+  // Without PANEL_DOMAIN the dashboard is not routed (and no hostname is reserved for it).
+  const panel = config.panelDomain ? { domain: config.panelDomain, upstream: config.panelUpstream } : undefined
 
   const deps: PipelineDeps = {
     db,
@@ -46,7 +48,7 @@ async function main(): Promise<void> {
     railpackPrepare,
     buildImage,
     waitHealthy,
-    regenerateRoutes: () => regenerateRoutes(db, config.traefikDynamicDir, undefined, routesTlsFor(config)),
+    regenerateRoutes: () => regenerateRoutes(db, config.traefikDynamicDir, undefined, routesTlsFor(config), panel),
     cleanupImages: async (serviceInstanceId) => {
       const removed = await cleanupImages({ db, docker, config }, serviceInstanceId)
       if (removed.length > 0) console.log(`removed ${removed.length} old image(s): ${removed.join(', ')}`)

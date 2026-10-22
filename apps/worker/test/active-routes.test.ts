@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
-import { afterAll, beforeEach, expect, test, vi } from 'vitest'
+import { afterAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
   createAppService,
   createProject,
@@ -13,7 +13,8 @@ import {
   setDeploymentStatus,
 } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
-import { loadActiveRoutes, regenerateRoutes } from '../src/routing/active-routes'
+import { loadActiveRoutes, type OnInvalidRoute, regenerateRoutes } from '../src/routing/active-routes'
+import type { RoutesTls } from '../src/routing/traefik-config'
 
 const t = await setupTestDb()
 const { db } = t
@@ -229,4 +230,92 @@ test('regenerateRoutes still writes the good routes when a sibling is invalid', 
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+describe('the panel route', () => {
+  const panel = { domain: 'panel.apps.example.com', upstream: 'http://vpsm-web:3000' }
+
+  async function routesYaml(onInvalid?: OnInvalidRoute, tls?: RoutesTls, withPanel = true): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'vpsm-regen-'))
+    try {
+      await regenerateRoutes(db, dir, onInvalid, tls, withPanel ? panel : undefined)
+      return await readFile(join(dir, 'routes.yml'), 'utf8')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('is rendered next to the routes of live apps, under the router key "panel"', async () => {
+    const si1 = await addService('web')
+    await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
+
+    const yaml = await routesYaml()
+
+    expect(yaml).toContain('    r-panel:\n      rule: Host(`panel.apps.example.com`)\n')
+    expect(yaml).toContain('      service: s-panel\n')
+    expect(yaml).toContain('    s-panel:\n      loadBalancer:\n        servers:\n          - url: http://vpsm-web:3000\n')
+    expect(yaml).toContain(`    r-${si1}:\n      rule: Host(\`web-shop.apps.example.com\`)\n`)
+  })
+
+  test('is rendered when no app is live', async () => {
+    const yaml = await routesYaml()
+
+    expect(yaml).toContain('    r-panel:\n')
+    expect(yaml).not.toBe('# no routes\n')
+  })
+
+  test('follows the tls mode like every other route', async () => {
+    expect(await routesYaml(undefined, 'resolver')).toContain('        certResolver: le\n')
+    expect(await routesYaml(undefined, 'entrypoint')).not.toContain('tls')
+  })
+
+  test('is not rendered without a panel', async () => {
+    const si1 = await addService('web')
+    await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
+
+    expect(await routesYaml(undefined, undefined, false)).not.toContain('panel')
+  })
+
+  test('an app that has the panel hostname is skipped and reported, siblings and the panel are kept', async () => {
+    const good = await addService('web')
+    const taken = await addService('api')
+    await deployLive(good, 'vpsm-web-aaaaaaaa', 3000)
+    await deployLive(taken, 'vpsm-api-bbbbbbbb', 4000)
+    await db.insert(domains).values({ serviceInstanceId: taken, hostname: panel.domain, kind: 'custom' })
+    const { calls, onInvalid } = collectInvalid()
+
+    const yaml = await routesYaml(onInvalid)
+
+    expect(calls).toEqual([[taken, 'hostname is reserved for the panel']])
+    expect(yaml).toContain(`    r-${good}:\n`)
+    expect(yaml).not.toContain(taken)
+    expect(yaml).not.toContain('vpsm-api-bbbbbbbb')
+    // The whole instance route is dropped, so its generated hostname is not served either.
+    expect(yaml).not.toContain('api-shop.apps.example.com')
+    expect(yaml.match(/panel\.apps\.example\.com/g)).toHaveLength(1)
+    expect(yaml).toContain('          - url: http://vpsm-web:3000\n')
+  })
+
+  test('loadActiveRoutes reserves the panel hostname only when it is given one', async () => {
+    const si1 = await addService('web')
+    await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
+    await db.insert(domains).values({ serviceInstanceId: si1, hostname: panel.domain, kind: 'custom' })
+    const { calls, onInvalid } = collectInvalid()
+
+    expect(await loadActiveRoutes(db, onInvalid, panel.domain)).toEqual([])
+    expect(calls).toEqual([[si1, 'hostname is reserved for the panel']])
+
+    expect(await loadActiveRoutes(db, onInvalid)).toHaveLength(1)
+    expect(calls).toHaveLength(1)
+  })
+
+  test('a different hostname under the same domain is not reserved', async () => {
+    const si1 = await addService('web')
+    await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
+    await db.insert(domains).values({ serviceInstanceId: si1, hostname: 'panel2.apps.example.com', kind: 'custom' })
+    const { calls, onInvalid } = collectInvalid()
+
+    expect(await loadActiveRoutes(db, onInvalid, panel.domain)).toHaveLength(1)
+    expect(calls).toEqual([])
+  })
 })

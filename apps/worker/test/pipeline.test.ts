@@ -16,6 +16,8 @@ import {
   markDeploymentLive,
   serviceInstances,
   setDeploymentStatus,
+  setResourceSettings,
+  users,
 } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
 import { BuildError } from '../src/build/errors'
@@ -106,6 +108,15 @@ async function setDeploy(partial: Partial<DeployConfig>): Promise<void> {
     .update(serviceInstances)
     .set({ deploy: { ...DEFAULT_DEPLOY_CONFIG, ...partial } })
     .where(eq(serviceInstances.id, instanceId))
+}
+
+/** Saves the memory limits an admin sets in the dashboard; they win over the worker's environment. */
+async function saveResourceSettings(memoryBudgetMb: number, maxServiceMemoryMb: number): Promise<void> {
+  const [admin] = await db
+    .insert(users)
+    .values({ email: `root-${randomUUID()}@example.com`, name: 'root', role: 'admin', passwordHash: 'x' })
+    .returning({ id: users.id })
+  await setResourceSettings(db, { memoryBudgetMb, maxServiceMemoryMb }, admin!.id)
 }
 
 /** A deployment that went live the way the pipeline does it; its container is running in FakeDocker unless `running: false`. */
@@ -539,6 +550,51 @@ describe('failures', () => {
     expect(deps.events).toEqual([])
   })
 
+  test('memory budget from settings overrides env', async () => {
+    await saveResourceSettings(1024, 512)
+    deps.docker.seedRunning([{ memoryMb: 1024 }])
+    const d = await queue()
+    await runDeployment(d.id, deps)
+    expect(await get(d.id)).toMatchObject({ status: 'FAILED', failureReason: 'memory budget exceeded: need 512 MB, available 0 MB' })
+    expect(deps.events).toEqual([])
+  })
+
+  test('a bigger memory budget from settings lets through what the env budget would refuse', async () => {
+    // The env budget is 5632 MB, so 5376 MB in use leaves 256 MB and the 512 MB service would not fit.
+    deps.docker.seedRunning([{ memoryMb: 2048 }, { memoryMb: 2048 }, { memoryMb: 1280 }])
+    await saveResourceSettings(8192, 2048)
+    const d = await queue()
+    await runDeployment(d.id, deps)
+    expect((await get(d.id)).status).toBe('SUCCESS')
+  })
+
+  test('the per-service max from settings overrides env, in both directions', async () => {
+    await saveResourceSettings(8192, 256)
+    const refused = await queue()
+    await runDeployment(refused.id, deps)
+    expect(await get(refused.id)).toMatchObject({ status: 'FAILED', failureReason: 'memory limit 512 MB exceeds per-service max 256 MB' })
+    expect(deps.events).toEqual([])
+
+    // The env max is 2048 MB, so 4096 MB would be refused without the setting.
+    await saveResourceSettings(8192, 4096)
+    await setDeploy({ memoryLimitMB: 4096 })
+    const allowed = await queue()
+    await runDeployment(allowed.id, deps)
+    expect((await get(allowed.id)).status).toBe('SUCCESS')
+  })
+
+  test('the settings are read again for every deployment', async () => {
+    const first = await queue()
+    await runDeployment(first.id, deps)
+    expect((await get(first.id)).status).toBe('SUCCESS')
+
+    // The first deployment's container uses 512 MB, which now fills the whole budget.
+    await saveResourceSettings(512, 512)
+    const second = await queue()
+    await runDeployment(second.id, deps)
+    expect(await get(second.id)).toMatchObject({ status: 'FAILED', failureReason: 'memory budget exceeded: need 512 MB, available 0 MB' })
+  })
+
   test.each([
     [{ cpuLimit: 0 }, 'invalid CPU limit: 0 (must be at least 0.01)'],
     [{ memoryLimitMB: 5 }, 'invalid memory limit: 5 MB (must be an integer of at least 6)'],
@@ -802,6 +858,112 @@ describe('rollback', () => {
     const rb = await queue('rollback')
     await runDeployment(rb.id, deps)
     expect(await get(rb.id)).toMatchObject({ status: 'FAILED', failureReason: 'rollback target not found' })
+  })
+})
+
+describe('restart', () => {
+  const liveDeploy = { port: 3000, memoryLimitMB: 256, healthcheckPath: '/live-health', healthcheckTimeoutSec: 30, startCommand: 'node live.js' }
+
+  // A restart is queued with the live deployment as its rollbackOfId; its image is what runs again.
+  async function restartScenario() {
+    const live = await liveDeployment('vpsm-web-live0000', {
+      imageTag: 'vpsm/si:live',
+      commitSha: 'live123',
+      commitMessage: 'live commit',
+      deploy: liveDeploy,
+      builder: 'dockerfile',
+    })
+    deps.docker.existingImages.add('vpsm/si:live')
+    const rs = await queue('restart', { rollbackOfId: live.id })
+    return { live, rs }
+  }
+
+  test('restart reuses the live image without building', async () => {
+    const { live, rs } = await restartScenario()
+
+    await runDeployment(rs.id, deps)
+
+    expect(deps.events).not.toContain('fetch')
+    expect(deps.events).not.toContain('build')
+    expect(deps.docker.lastSpec().Image).toBe(live.imageTag)
+    expect(deps.events).toEqual([
+      `run ${nameOf(rs)}`,
+      'health',
+      `alias ${nameOf(rs)} web.internal`,
+      'health',
+      'routes',
+      'sleep 3000',
+      'sleep 10000',
+      'stop vpsm-web-live0000',
+      'cleanup',
+    ])
+    expect(await statusHistory(rs.id)).toEqual(['QUEUED', 'DEPLOYING', 'SUCCESS'])
+    expect((await get(rs.id)).status).toBe('SUCCESS')
+    expect((await get(live.id)).status).toBe('REMOVED')
+  })
+
+  test('restart records the image, commit and config snapshot of the live deployment', async () => {
+    const { live, rs } = await restartScenario()
+
+    await runDeployment(rs.id, deps)
+
+    expect(await get(rs.id)).toMatchObject({
+      status: 'SUCCESS',
+      trigger: 'restart',
+      imageTag: 'vpsm/si:live',
+      commitSha: 'live123',
+      commitMessage: 'live commit',
+      configSnapshot: live.configSnapshot,
+      containerName: nameOf(rs),
+    })
+    expect(await logLines(rs.id)).toContain(`==> Restarting deployment ${live.id.slice(0, 8)} (image vpsm/si:live)`)
+  })
+
+  test('restart runs with the config snapshot of the live deployment, not the current service config', async () => {
+    const { rs } = await restartScenario()
+    // Saved without deploying: a restart must not pick this up.
+    await setDeploy({ port: 9000, memoryLimitMB: 1024, healthcheckPath: '/new-health' })
+
+    await runDeployment(rs.id, deps)
+
+    expect((await get(rs.id)).status).toBe('SUCCESS')
+    const spec = deps.docker.lastSpec()
+    expect(spec.Env).toContain('PORT=3000')
+    expect(spec.HostConfig?.Memory).toBe(256 * 1024 * 1024)
+    expect(spec.Cmd).toEqual(['sh', '-c', 'node live.js'])
+  })
+
+  test('restart is checked against the memory settings like any deployment', async () => {
+    const { live, rs } = await restartScenario()
+    // The live container (256 MB) is still running next to the new one, so both have to fit.
+    await saveResourceSettings(400, 256)
+
+    await runDeployment(rs.id, deps)
+
+    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'memory budget exceeded: need 256 MB, available 144 MB' })
+    expect(deps.events).toEqual([])
+    expect((await get(live.id)).status).toBe('SUCCESS')
+  })
+
+  test('a restart whose image is gone fails and leaves the live deployment alone', async () => {
+    const { live, rs } = await restartScenario()
+    deps.docker.existingImages.delete('vpsm/si:live')
+
+    await runDeployment(rs.id, deps)
+
+    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'image for rollback target no longer exists' })
+    expect(deps.events).toEqual([])
+    expect((await get(live.id)).status).toBe('SUCCESS')
+    expect(deps.docker.has('vpsm-web-live0000')).toBe(true)
+  })
+
+  test('a restart without a target fails clearly instead of building', async () => {
+    const rs = await queue('restart')
+
+    await runDeployment(rs.id, deps)
+
+    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'rollback target not found' })
+    expect(deps.events).toEqual([])
   })
 })
 
