@@ -1,0 +1,32 @@
+# Override for a server whose ports 80 and 443 are already taken (for example by Nginx Proxy Manager).
+# Traefik then listens on one alternate HTTPS port only, and gets a single wildcard certificate
+# (*.APPS_DOMAIN) from Let's Encrypt through the DNS-01 challenge at DuckDNS, which needs no port 80.
+# DuckDNS keeps one TXT record at a time, so the certificate has no extra names (SANs).
+#
+# Use it on top of docker-compose.yml, usually by setting this in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.dns-tls.yml
+#   TLS_MODE=dns-wildcard
+#   PUBLIC_HTTPS_PORT=8443
+#   TRAEFIK_HTTPS_PORT=8443
+#   DUCKDNS_TOKEN=<token from your duckdns.org account>
+# See docs/operations.md.
+services:
+  traefik:
+    # !override replaces the lists of docker-compose.yml instead of appending to them,
+    # so neither port 80 nor 443 stays published.
+    ports: !override
+      - '${TRAEFIK_HTTPS_PORT:-8443}:443'
+    environment:
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:?DUCKDNS_TOKEN is required}
+    # No web entrypoint (nothing listens on 80) and no HTTP challenge. The websecure entrypoint asks for
+    # the wildcard certificate itself; the routers written by the worker (TLS_MODE=dns-wildcard) just use it.
+    command: !override
+      - --providers.file.directory=/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls.certresolver=le
+      - --entrypoints.websecure.http.tls.domains[0].main=*.${APPS_DOMAIN:?APPS_DOMAIN is required}
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?ACME_EMAIL is required}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+      - --certificatesresolvers.le.acme.dnschallenge.provider=duckdns
+      - --log.level=INFO

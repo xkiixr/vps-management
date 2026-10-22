@@ -27,7 +27,7 @@
 
 - VPS Ubuntu 4 vCPU, RAM 8 GB, เข้าถึงด้วย SSH และมีสิทธิ์ `sudo`
 - โดเมนที่ตั้ง DNS ได้ (ในตัวอย่างใช้ `apps.example.com` ให้แทนด้วยโดเมนจริง)
-- port 80 และ 443 เข้าถึงได้จากอินเทอร์เน็ต (Let's Encrypt ใช้ HTTP challenge ผ่าน port 80)
+- port 80 และ 443 เข้าถึงได้จากอินเทอร์เน็ต (Let's Encrypt ใช้ HTTP challenge ผ่าน port 80) ถ้าสอง port นี้ถูกโปรแกรมอื่นใช้อยู่ ให้ดูหัวข้อ "เมื่อ port 80/443 ถูกใช้อยู่แล้ว" ท้ายคู่มือ
 - โค้ดของโปรเจกต์นี้อยู่บน GitHub (repo `xkiixr/vps-management`) และ push ขึ้นไปแล้ว เพราะ worker ดึงแอปตัวอย่างจาก GitHub
 
 ## หน่วยความจำและ swap (อ่านก่อนติดตั้ง)
@@ -200,3 +200,52 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
    sudo docker compose kill worker && sudo docker compose up -d worker
    ```
    deployment นั้นต้องเป็น `FAILED` (`worker restarted during deployment`), เว็บยังตอบ `200` และ `sudo docker ps --filter label=vpsm.managed=true` เหลือ container ของ hello เพียงตัวเดียว ขั้นนี้ต้องใช้ `kill` ไม่ใช่ `restart` หรือ `stop` เพราะสองคำสั่งนั้นส่ง SIGTERM และ worker จะรอให้ deployment ที่กำลังทำอยู่ทำเสร็จก่อนได้นานสุด 50 วินาที deploy สั้นๆ จึงจบเป็น `SUCCESS` ได้ตามปกติ ซึ่งไม่ได้แปลว่าการกู้งานค้างเสีย
+
+## เมื่อ port 80/443 ถูกใช้อยู่แล้ว (เช่น Nginx Proxy Manager)
+
+ใช้หัวข้อนี้เมื่อบน VPS มีโปรแกรมอื่นใช้ port 80/443 อยู่ และต้องให้มันทำงานต่อ (เช่น Nginx Proxy Manager) Traefik จึงรับ HTTPS ที่ port อื่นแทน (ในตัวอย่างใช้ 8443) และเพราะ Let's Encrypt แบบ HTTP challenge ต้องใช้ port 80 จึงเปลี่ยนไปขอใบรับรองด้วย DNS challenge ผ่าน DuckDNS แทน ระบบขอใบรับรอง **wildcard เพียงใบเดียว** (`*.<APPS_DOMAIN>`) ให้ทุกแอปใช้ร่วมกัน เพราะ DuckDNS เก็บ TXT record ได้ทีละค่าเดียว
+
+ข้อกำหนด: `APPS_DOMAIN` ต้องเป็นชื่อบน DuckDNS เช่น `itexcellence.duckdns.org` (token ต้องเป็นของบัญชีที่เป็นเจ้าของชื่อนั้น) และต้องตั้ง IP ของชื่อนั้นบน DuckDNS เป็น IP ของ VPS ชื่อย่อยทุกชื่อ (`*.itexcellence.duckdns.org`) จะชี้มาที่ IP เดียวกัน
+
+ถ้า port 80/443 ว่างอยู่ ไม่ต้องทำหัวข้อนี้ ใช้ค่าเริ่มต้นตามหัวข้อ 1–4
+
+### ขั้นตอนบน VPS
+
+1. เพิ่มค่าเหล่านี้ใน `.env` (ท้ายไฟล์ `.env.example` มีตัวอย่างที่ปิดด้วย `#` อยู่ ให้คัดลอกไปแล้วเอา `#` ออก):
+
+   ```bash
+   COMPOSE_FILE=docker-compose.yml:docker-compose.dns-tls.yml
+   TLS_MODE=dns-wildcard
+   PUBLIC_HTTPS_PORT=8443
+   TRAEFIK_HTTPS_PORT=8443
+   DUCKDNS_TOKEN=<token จากหน้า account ของ duckdns.org>
+   ```
+
+   Compose อ่าน `COMPOSE_FILE` จาก `.env` จึงใช้ `docker-compose.dns-tls.yml` ซ้อนบน `docker-compose.yml` ให้เองทุกครั้ง คำสั่ง `sudo docker compose …` ทั้งหมดในคู่มือนี้จึงใช้ต่อได้โดยไม่ต้องแก้ `DUCKDNS_TOKEN` เป็นความลับ ห้าม commit และห้ามแปะในที่ที่คนอื่นเห็น
+
+2. เปิด port 8443 ใน firewall (ถ้าผู้ให้บริการ VPS มี firewall ของตัวเองด้วย ต้องเปิดที่นั่นด้วย):
+
+   ```bash
+   sudo ufw allow 8443/tcp
+   ```
+
+3. สร้าง container ใหม่:
+
+   ```bash
+   sudo docker compose up -d
+   ```
+
+   คำสั่งนี้สร้าง `traefik` และ `worker` ใหม่ ตอน worker เริ่มทำงานจะเขียน route ของแอปที่ live อยู่ใหม่ให้ใช้ใบรับรอง wildcard เอง ไม่ต้อง deploy ใหม่
+
+4. ตรวจว่า Traefik ทำงานและได้ใบรับรอง:
+
+   ```bash
+   sudo docker compose ps
+   sudo docker compose logs traefik
+   ```
+
+   `docker compose ps` ต้องแสดง `vpsm-traefik` เป็น `running` และ port เป็น `0.0.0.0:8443->443/tcp` (ไม่มี port 80 หรือ 443) การขอใบรับรองด้วย DNS challenge ใช้เวลา 1–2 นาทีหลัง Traefik เริ่ม ให้รอแล้วดู log อีกครั้ง ถ้ามีบรรทัด error ที่เกี่ยวกับ `acme` หรือ `duckdns` ให้ตรวจว่า `DUCKDNS_TOKEN` ถูกต้อง และ `APPS_DOMAIN` เป็นชื่อที่ token นั้นเป็นเจ้าของ
+
+5. URL ของแอปจะลงท้ายด้วย `:8443` เช่น `https://hello-demo.itexcellence.duckdns.org:8443` (คำสั่ง `service:create` และ `status` รวมถึง log ของ deployment พิมพ์ URL แบบนี้ให้เอง)
+
+ระบบขอใบรับรองแค่ใบเดียวสำหรับ `*.<APPS_DOMAIN>` ไม่ว่าจะมีกี่แอป จึงไม่ติดเพดานการออกใบรับรองของ Let's Encrypt ที่เกิดจากการขอทีละชื่อแบบโหมดปกติ
