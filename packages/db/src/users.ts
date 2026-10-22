@@ -3,6 +3,7 @@ import { hash, verify } from '@node-rs/argon2'
 import { and, asc, eq, getTableColumns, gt, isNull, lte, sql } from 'drizzle-orm'
 import type { Db } from './client'
 import { ValidationError, violatedUniqueConstraint } from './errors'
+import { CONTROL_CHARACTERS, isUuid, normalizeEmail } from './input'
 import { sessions, type User, users } from './schema'
 
 export const MIN_PASSWORD_LENGTH = 12
@@ -21,9 +22,6 @@ const { passwordHash: _passwordHash, ...safeUserColumns } = getTableColumns(user
 const GENERATED_PASSWORD_LENGTH = 20
 const PASSWORD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+$/
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-// C0 control characters and DEL. NUL in particular makes Postgres reject the whole statement.
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 const LAST_ADMIN_MESSAGE = 'at least one active admin is required'
 
 // --- passwords ---------------------------------------------------------------------------------------
@@ -74,17 +72,13 @@ function getDummyHash(): Promise<string> {
 
 // --- users -------------------------------------------------------------------------------------------
 
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase()
-}
-
 function assertRole(role: string): asserts role is Role {
   if (role !== 'admin' && role !== 'member') throw new ValidationError('role must be "admin" or "member"')
 }
 
 // Unknown ids and ids that are not even UUIDs are the same thing to callers; avoid a Postgres cast error.
 function assertUserId(userId: string): void {
-  if (!UUID_PATTERN.test(userId)) throw new ValidationError('user not found')
+  if (!isUuid(userId)) throw new ValidationError('user not found')
 }
 
 // Drizzle's query errors put the statement *parameters* in their message, and util.inspect prints the `cause`

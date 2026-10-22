@@ -18,6 +18,7 @@ import {
   setDeploymentStatus,
 } from '../src/index'
 import { setupTestDb } from '../src/testing'
+import { listenDuring } from './helpers'
 
 const t = await setupTestDb()
 const { db } = t
@@ -59,32 +60,6 @@ async function liveDeployment(instanceId: string) {
   return setDeploymentStatus(db, d.id, 'SUCCESS', { containerName: `vpsm-web-${d.id.slice(0, 8)}` })
 }
 
-const NOTIFY_WAIT_MS = 2000
-
-// Collects NOTIFY payloads delivered on `channel` while `action` runs. Postgres delivers notifications in
-// commit order, so once a marker sent after the action arrives, everything the action notified has arrived
-// too; that marker (or, if it never comes, NOTIFY_WAIT_MS) ends the wait.
-async function listenDuring(channel: string, action: () => Promise<unknown>): Promise<string[]> {
-  const marker = `end-of-listen-${Math.random()}`
-  const payloads: string[] = []
-  let markerArrived: () => void = () => {}
-  const arrived = new Promise<void>((resolve) => (markerArrived = resolve))
-  const subscription = await t.sql.listen(channel, (payload) => {
-    if (payload === marker) markerArrived()
-    else payloads.push(payload)
-  })
-  let timer: NodeJS.Timeout | undefined
-  try {
-    await action()
-    await t.sql.notify(channel, marker)
-    await Promise.race([arrived, new Promise((resolve) => (timer = setTimeout(resolve, NOTIFY_WAIT_MS)))])
-  } finally {
-    clearTimeout(timer)
-    await subscription.unlisten()
-  }
-  return payloads
-}
-
 test('enqueue creates a QUEUED deployment with its metadata', async () => {
   const d = await enqueueDeployment(db, {
     serviceInstanceId,
@@ -105,7 +80,7 @@ test('enqueue creates a QUEUED deployment with its metadata', async () => {
 
 test('enqueue notifies the queue channel with the deployment id', async () => {
   let id = ''
-  const payloads = await listenDuring(DEPLOYMENTS_CHANNEL, async () => {
+  const payloads = await listenDuring(t.sql, DEPLOYMENTS_CHANNEL, async () => {
     id = (await enqueueDeployment(db, { serviceInstanceId, trigger: 'push' })).id
   })
   expect(payloads).toEqual([id])
@@ -302,13 +277,13 @@ test('appendDeploymentLogs stores lines in order', async () => {
 
 test('appendDeploymentLogs notifies the log channel with the deployment id', async () => {
   const d = await enqueueDeployment(db, { serviceInstanceId, trigger: 'manual' })
-  const payloads = await listenDuring(DEPLOYMENT_LOG_CHANNEL, () => appendDeploymentLogs(db, d.id, 'build', ['a']))
+  const payloads = await listenDuring(t.sql, DEPLOYMENT_LOG_CHANNEL, () => appendDeploymentLogs(db, d.id, 'build', ['a']))
   expect(payloads).toEqual([d.id])
 })
 
 test('appendDeploymentLogs with no lines is a no-op', async () => {
   const d = await enqueueDeployment(db, { serviceInstanceId, trigger: 'manual' })
-  const payloads = await listenDuring(DEPLOYMENT_LOG_CHANNEL, () => appendDeploymentLogs(db, d.id, 'build', []))
+  const payloads = await listenDuring(t.sql, DEPLOYMENT_LOG_CHANNEL, () => appendDeploymentLogs(db, d.id, 'build', []))
   expect(payloads).toEqual([])
   expect(await db.select().from(deploymentLogs)).toHaveLength(0)
 })

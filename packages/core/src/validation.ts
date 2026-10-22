@@ -14,7 +14,8 @@ export type ServiceInput = {
 
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const WHITESPACE_PATTERN = /\s/
-const MIN_MEMORY_MB = 6
+// Docker refuses a memory limit below 6 MB.
+export const MIN_MEMORY_MB = 6
 const MAX_PORT = 65535
 const MAX_START_COMMAND_LENGTH = 1000
 

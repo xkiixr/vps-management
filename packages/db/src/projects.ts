@@ -10,12 +10,14 @@ import {
 } from '@vpsm/core'
 import type { Db } from './client'
 import { ValidationError, violatedUniqueConstraint } from './errors'
+import { isUuid } from './input'
 import {
   type Domain,
   domains,
   type Environment,
   environments,
   type Project,
+  projectMembers,
   projects,
   type Service,
   type ServiceInstance,
@@ -23,7 +25,7 @@ import {
   services,
 } from './schema'
 
-const PRODUCTION_ENVIRONMENT = 'production'
+export const PRODUCTION_ENVIRONMENT = 'production'
 
 // Defined in ./errors so users.ts can share it; re-exported here to keep the package's public API unchanged.
 export { ValidationError }
@@ -41,14 +43,18 @@ function withoutUndefined<T extends object>(value: T | undefined): Partial<T> {
   return Object.fromEntries(Object.entries(value ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>
 }
 
-export async function createProject(db: Db, name: string): Promise<Project> {
+// With a creator (the web dashboard), the creator becomes the project's first member in the same transaction.
+// Without one (the worker CLI), the project starts with no members and only admins see it.
+export async function createProject(db: Db, name: string, creatorId?: string): Promise<Project> {
   const validation = validateName(name)
   if (!validation.ok) throw new ValidationError(`invalid project name "${name}": ${validation.reason}`)
+  if (creatorId !== undefined && !isUuid(creatorId)) throw new ValidationError('user not found')
 
   try {
     return await db.transaction(async (tx) => {
       const [project] = await tx.insert(projects).values({ name }).returning()
       await tx.insert(environments).values({ projectId: project!.id, name: PRODUCTION_ENVIRONMENT })
+      if (creatorId !== undefined) await tx.insert(projectMembers).values({ projectId: project!.id, userId: creatorId })
       return project!
     })
   } catch (error) {
