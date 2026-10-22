@@ -2,13 +2,13 @@
 
 import { cookies, headers } from 'next/headers'
 import { redirect } from 'next/navigation'
-import { attemptLogin } from '../auth'
+import { attemptLogin, logout } from '../auth'
 import { webConfig } from '../config'
 import { getDb } from '../db'
 import { actionError, logServerError } from '../errors'
 import { assertSameOrigin } from '../origin'
-import { loginLimiter } from '../rate-limit'
-import { endSession, setSessionCookie } from '../session'
+import { loginLimits } from '../rate-limit'
+import { setSessionCookie } from '../session'
 
 export type LoginState = { error?: string }
 
@@ -18,7 +18,7 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
 
   let result: Awaited<ReturnType<typeof attemptLogin>>
   try {
-    result = await attemptLogin({ db: getDb(), limiter: loginLimiter(), headers: h }, formData)
+    result = await attemptLogin({ db: getDb(), limits: loginLimits(), headers: h }, formData)
   } catch (error) {
     return actionError(error, 'login')
   }
@@ -33,7 +33,7 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
 export async function logoutAction(): Promise<void> {
   assertSameOrigin(await headers(), webConfig().panelOrigin)
   try {
-    await endSession(getDb(), await cookies())
+    await logout(getDb(), await cookies())
   } catch (error) {
     logServerError('logout', error)
   }

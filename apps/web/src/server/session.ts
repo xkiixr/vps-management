@@ -53,11 +53,14 @@ export async function resolveSessionUser(db: Db, jar: CookieJar): Promise<SafeUs
   return session.user
 }
 
-/** Logout: the session row is deleted and the cookie cleared. */
-export async function endSession(db: Db, jar: CookieJar): Promise<void> {
+/**
+ * Logout: the session row is deleted and the cookie cleared (also when deleting fails). Returns the id of the user
+ * whose session it was, or null when the cookie named no session.
+ */
+export async function endSession(db: Db, jar: CookieJar): Promise<string | null> {
   const token = jar.get(SESSION_COOKIE)?.value
   try {
-    if (token) await deleteSession(db, token)
+    return token ? await deleteSession(db, token) : null
   } finally {
     clearSessionCookie(jar)
   }

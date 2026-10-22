@@ -132,17 +132,18 @@ describe('resolveSessionUser', () => {
 })
 
 describe('endSession', () => {
-  test('deletes the session row and clears the cookie', async () => {
-    const { token, jar } = await userWithSession()
-    await endSession(t.db, jar)
+  test('deletes the session row, clears the cookie and says whose session it was', async () => {
+    const { user, token, jar } = await userWithSession()
+    expect(await endSession(t.db, jar)).toBe(user.id)
     expect(await resolveSession(t.db, token)).toBeNull()
     expect(jar.writes.at(-1)).toMatchObject({ name: SESSION_COOKIE, value: '', options: { maxAge: 0, secure: true, path: '/' } })
   })
 
-  test('without a cookie it only clears the cookie', async () => {
-    const jar = new MemoryCookieJar()
-    await endSession(t.db, jar)
-    expect(jar.writes).toHaveLength(1)
-    expect(jar.writes[0]!.options.maxAge).toBe(0)
+  test('without a live session row it only clears the cookie', async () => {
+    for (const jar of [new MemoryCookieJar(), new MemoryCookieJar({ [SESSION_COOKIE]: 'not-a-session' })]) {
+      expect(await endSession(t.db, jar)).toBeNull()
+      expect(jar.writes).toHaveLength(1)
+      expect(jar.writes[0]!.options.maxAge).toBe(0)
+    }
   })
 })

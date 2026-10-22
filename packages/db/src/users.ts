@@ -267,8 +267,13 @@ export async function resolveSession(
   return { user: row.user, sessionId, expiresAt, renewed: true }
 }
 
-export async function deleteSession(db: Db, token: string): Promise<void> {
-  await db.delete(sessions).where(eq(sessions.id, sessionIdOf(token)))
+// Returns the id of the user whose session it was, or null when there was no such session.
+export async function deleteSession(db: Db, token: string): Promise<string | null> {
+  const [deleted] = await db
+    .delete(sessions)
+    .where(eq(sessions.id, sessionIdOf(token)))
+    .returning({ userId: sessions.userId })
+  return deleted?.userId ?? null
 }
 
 export async function purgeExpiredSessions(db: Db): Promise<number> {

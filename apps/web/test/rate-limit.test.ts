@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { clientIp, createLoginLimiter, loginKey } from '@/server/rate-limit'
+import { clientIp, createLoginLimiter, createLoginLimits, loginKey } from '@/server/rate-limit'
 
 const WINDOW_MS = 15 * 60_000
 
@@ -53,24 +53,64 @@ describe('createLoginLimiter', () => {
     expect(limiter.check('b')).toBe(true)
   })
 
-  test('keeps at most maxKeys keys, evicting the one that failed least recently', () => {
-    const limiter = createLoginLimiter({ max: 1, windowMs: WINDOW_MS, maxKeys: 3 })
-    limiter.fail('a')
-    limiter.fail('b')
-    limiter.fail('c')
-    limiter.fail('a') // refreshes "a": "b" is now the oldest
-    limiter.fail('d') // a fourth key evicts "b"
-    expect(limiter.check('a')).toBe(false)
-    expect(limiter.check('b')).toBe(true)
-    expect(limiter.check('c')).toBe(false)
-    expect(limiter.check('d')).toBe(false)
+  test('junk keys cannot push out a blocked key: once full of live keys, new keys are refused instead', () => {
+    const clock = fakeClock()
+    const limiter = createLoginLimiter({ max: 1, windowMs: WINDOW_MS, maxKeys: 3, now: clock.now })
+    limiter.fail('203.0.113.7|victim@example.com')
+    expect(limiter.check('203.0.113.7|victim@example.com')).toBe(false)
+
+    for (let n = 0; n < 100; n++) {
+      const junk = `203.0.113.7|junk-${n}@example.com`
+      if (limiter.check(junk)) limiter.fail(junk)
+      clock.advance(1000)
+    }
     expect(limiter.size()).toBe(3)
+    expect(limiter.check('203.0.113.7|junk-99@example.com')).toBe(false) // no room: refused
+    limiter.fail('203.0.113.7|junk-99@example.com') // and not recorded either
+    expect(limiter.size()).toBe(3)
+    expect(limiter.check('203.0.113.7|victim@example.com')).toBe(false)
+  })
+
+  test('expired keys are pruned to make room, oldest latest-failure first, never a live key', () => {
+    const clock = fakeClock()
+    const limiter = createLoginLimiter({ max: 1, windowMs: WINDOW_MS, maxKeys: 2, now: clock.now })
+    limiter.fail('a') // t = 0
+    clock.advance(60_000)
+    limiter.fail('b') // t = 1 min
+    clock.advance(60_000)
+    limiter.fail('a') // t = 2 min: "a" failed again, so "b" now has the oldest latest failure
+    expect(limiter.check('c')).toBe(false) // full, nothing expired
+
+    clock.advance(WINDOW_MS - 60_000) // t = 16 min: "b" (1 min) has expired, "a" (2 min) has not
+    expect(limiter.check('c')).toBe(true)
+    limiter.fail('c')
+    expect(limiter.size()).toBe(2)
+    expect(limiter.check('a')).toBe(false) // still blocked: a live key is never dropped
+    expect(limiter.check('c')).toBe(false)
   })
 
   test('the default bound is 10 000 keys', () => {
     const limiter = createLoginLimiter({ max: 10, windowMs: WINDOW_MS })
     for (let n = 0; n < 10_050; n++) limiter.fail(`key-${n}`)
     expect(limiter.size()).toBe(10_000)
+    expect(limiter.check('key-0')).toBe(true) // known key, one failure
+    expect(limiter.check('key-10049')).toBe(false) // never got in
+  })
+})
+
+describe('createLoginLimits', () => {
+  test('10 failures per IP and email, 50 per IP, over 15 minutes', () => {
+    const clock = fakeClock()
+    const limits = createLoginLimits({ now: clock.now })
+    for (let n = 0; n < 10; n++) limits.perEmail.fail('ip|a@example.com')
+    expect(limits.perEmail.check('ip|a@example.com')).toBe(false)
+    for (let n = 0; n < 49; n++) limits.perIp.fail('203.0.113.7')
+    expect(limits.perIp.check('203.0.113.7')).toBe(true)
+    limits.perIp.fail('203.0.113.7')
+    expect(limits.perIp.check('203.0.113.7')).toBe(false)
+    clock.advance(WINDOW_MS)
+    expect(limits.perIp.check('203.0.113.7')).toBe(true)
+    expect(limits.perEmail.check('ip|a@example.com')).toBe(true)
   })
 })
 

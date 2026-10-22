@@ -1,13 +1,24 @@
-import { authenticate, createSession, type Db, MAX_PASSWORD_LENGTH, ValidationError } from '@vpsm/db'
+import {
+  type AuditEntry,
+  authenticate,
+  createSession,
+  type Db,
+  MAX_PASSWORD_LENGTH,
+  recordAudit,
+  ValidationError,
+} from '@vpsm/db'
+import { logServerError } from './errors'
 import type { HeaderReader } from './origin'
-import { clientIp, type LoginLimiter, loginKey } from './rate-limit'
+import { clientIp, type LoginLimits, loginKey } from './rate-limit'
+import { type CookieJar, endSession } from './session'
 
 export const LOGIN_FAILED = 'invalid email or password'
 export const LOGIN_THROTTLED = 'too many attempts, try again later'
 
-// RFC 5321 caps an address at 254 characters; anything much longer cannot be an account and would only bloat the
-// limiter's keys.
+// RFC 5321 caps an address at 254 characters; anything much longer cannot be an account.
 const MAX_EMAIL_LENGTH = 320
+// The same rule @vpsm/db applies: no stored email or password contains a C0 control character or DEL.
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 
 export type LoginResult = { error: string } | { session: { token: string; expiresAt: Date } }
 
@@ -16,34 +27,69 @@ const field = (form: FormData, name: string) => {
   return typeof value === 'string' ? value : ''
 }
 
+// Input that no account can match. It is refused without a per-email limiter key (so junk cannot fill that
+// limiter), the database or argon2; it still counts against the IP's limit.
+const cannotMatchAnyAccount = (email: string, password: string) =>
+  email.length > MAX_EMAIL_LENGTH ||
+  !email.includes('@') ||
+  CONTROL_CHARACTERS.test(email) ||
+  password.length > MAX_PASSWORD_LENGTH ||
+  CONTROL_CHARACTERS.test(password)
+
+// An audit row is a record, not part of the action: failing to write it is logged and the action stands.
+async function auditBestEffort(db: Db, entry: AuditEntry): Promise<void> {
+  try {
+    await recordAudit(db, entry)
+  } catch (error) {
+    logServerError(`recording ${entry.action}`, error)
+  }
+}
+
 /**
- * Checks the credentials in a login form and opens a session. Every failure looks the same to the caller, so the
- * response never tells whether an email has an account. Throws only for unexpected (database) failures.
+ * Checks the credentials in a login form and opens a session (audited as `auth.login`). Every failure looks the same
+ * to the caller, so the response never tells whether an email has an account. Throws only for unexpected
+ * (database) failures.
  */
 export async function attemptLogin(
-  deps: { db: Db; limiter: LoginLimiter; headers: HeaderReader },
+  deps: { db: Db; limits: LoginLimits; headers: HeaderReader },
   form: FormData,
 ): Promise<LoginResult> {
-  const email = field(form, 'email')
+  const { perEmail, perIp } = deps.limits
+  const email = field(form, 'email').trim().toLowerCase()
   const password = field(form, 'password')
-  // No stored account can match these; refused before they reach the limiter, the database or argon2.
-  if (email.length > MAX_EMAIL_LENGTH || password.length > MAX_PASSWORD_LENGTH) return { error: LOGIN_FAILED }
+  const ip = clientIp(deps.headers)
 
-  const key = loginKey(clientIp(deps.headers), email)
-  if (!deps.limiter.check(key)) return { error: LOGIN_THROTTLED }
-  // Counted before the password is checked: check() and fail() run without an await between them, so concurrent
-  // requests cannot all pass check() before any of them is counted. A success clears the count again.
-  deps.limiter.fail(key)
+  if (!perIp.check(ip)) return { error: LOGIN_THROTTLED }
+  if (cannotMatchAnyAccount(email, password)) {
+    perIp.fail(ip)
+    return { error: LOGIN_FAILED }
+  }
+  const key = loginKey(ip, email)
+  if (!perEmail.check(key)) return { error: LOGIN_THROTTLED }
+  // Counted before the password is checked: the checks above and these two calls run without an await between
+  // them, so concurrent requests cannot all pass check() before any of them is counted. A success clears the
+  // per-email count again; the per-IP count stays, so one valid account cannot be used to reset it.
+  perIp.fail(ip)
+  perEmail.fail(key)
 
   const user = await authenticate(deps.db, email, password)
   if (!user) return { error: LOGIN_FAILED }
-  deps.limiter.reset(key)
+  perEmail.reset(key)
 
+  let session: { token: string; expiresAt: Date }
   try {
-    return { session: await createSession(deps.db, user.id) }
+    session = await createSession(deps.db, user.id)
   } catch (error) {
     // Disabled (or deleted) between authenticate() and here; saying so would reveal that the account exists.
     if (error instanceof ValidationError) return { error: LOGIN_FAILED }
     throw error
   }
+  await auditBestEffort(deps.db, { actorId: user.id, action: 'auth.login', targetType: 'user', targetId: user.id, metadata: { ip } })
+  return { session }
+}
+
+/** Ends the session in the cookie (see endSession) and records `auth.logout` when it belonged to a user. */
+export async function logout(db: Db, jar: CookieJar): Promise<void> {
+  const userId = await endSession(db, jar)
+  if (userId) await auditBestEffort(db, { actorId: userId, action: 'auth.logout', targetType: 'user', targetId: userId })
 }

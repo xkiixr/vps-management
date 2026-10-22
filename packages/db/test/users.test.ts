@@ -290,10 +290,10 @@ test('deleteSession ends only that session', async () => {
   const u = await makeUser('a@x.io')
   const first = await createSession(db, u.id)
   const second = await createSession(db, u.id)
-  await deleteSession(db, first.token)
+  expect(await deleteSession(db, first.token)).toBe(u.id)
   expect(await resolveSession(db, first.token)).toBeNull()
   expect(await resolveSession(db, second.token)).not.toBeNull()
-  await deleteSession(db, first.token)
+  expect(await deleteSession(db, first.token)).toBeNull()
 })
 
 test('cannot disable or demote the last active admin', async () => {
