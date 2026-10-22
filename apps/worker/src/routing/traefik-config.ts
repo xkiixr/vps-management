@@ -30,6 +30,9 @@ export function validateRoute(route: Route): void {
 }
 
 export function renderRoutesYaml(routes: Route[]): string {
+  // Traefik rejects a file whose routers and services are all empty ("routers cannot be a standalone
+  // element") and then keeps serving the previous routes, so "no routes" is a comment-only file.
+  if (routes.length === 0) return '# no routes\n'
   const routers: Record<string, unknown> = {}
   const services: Record<string, unknown> = {}
   for (const route of routes) {

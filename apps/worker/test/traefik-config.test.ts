@@ -60,8 +60,9 @@ test('does not reorder the caller hostnames array', () => {
   expect(hostnames).toEqual(['b.example.com', 'a.example.com'])
 })
 
-test('empty route list is still valid config', () => {
-  expect(renderRoutesYaml([])).toBe('http:\n  routers: {}\n  services: {}\n')
+// Traefik 3.7 refuses `http: {routers: {}, services: {}}` and keeps the old routes; a comment-only file clears them.
+test('empty route list renders a comment-only file', () => {
+  expect(renderRoutesYaml([])).toBe('# no routes\n')
 })
 
 test('refuses hostnames that could inject Traefik rules', () => {
