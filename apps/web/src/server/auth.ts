@@ -1,13 +1,5 @@
-import {
-  type AuditEntry,
-  authenticate,
-  createSession,
-  type Db,
-  MAX_PASSWORD_LENGTH,
-  recordAudit,
-  ValidationError,
-} from '@vpsm/db'
-import { logServerError } from './errors'
+import { authenticate, createSession, type Db, MAX_PASSWORD_LENGTH, ValidationError } from '@vpsm/db'
+import { auditBestEffort } from './audit'
 import type { HeaderReader } from './origin'
 import { clientIp, type LoginLimits, loginKey } from './rate-limit'
 import { type CookieJar, endSession } from './session'
@@ -35,15 +27,6 @@ const cannotMatchAnyAccount = (email: string, password: string) =>
   CONTROL_CHARACTERS.test(email) ||
   password.length > MAX_PASSWORD_LENGTH ||
   CONTROL_CHARACTERS.test(password)
-
-// An audit row is a record, not part of the action: failing to write it is logged and the action stands.
-async function auditBestEffort(db: Db, entry: AuditEntry): Promise<void> {
-  try {
-    await recordAudit(db, entry)
-  } catch (error) {
-    logServerError(`recording ${entry.action}`, error)
-  }
-}
 
 /**
  * Checks the credentials in a login form and opens a session (audited as `auth.login`). Every failure looks the same

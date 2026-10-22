@@ -1,7 +1,7 @@
 import { notFound, redirect } from 'next/navigation'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { ValidationError } from '@vpsm/db'
-import { actionError, GENERIC_ERROR } from '@/server/errors'
+import { actionError, GENERIC_ERROR, NotFoundError } from '@/server/errors'
 import { nextErrorDigest, NOT_FOUND_DIGEST, redirectTarget } from './helpers'
 
 afterEach(() => {
@@ -42,5 +42,11 @@ describe('actionError', () => {
     }
     expect(redirectTarget(await nextErrorDigest(catchAndMap(() => redirect('/login'))))).toBe('/login')
     expect(await nextErrorDigest(catchAndMap(() => notFound()))).toBe(NOT_FOUND_DIGEST)
+  })
+
+  test('turns a NotFoundError into the 404 page, without logging anything', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(await nextErrorDigest(() => actionError(new NotFoundError(), 'deleting project'))).toBe(NOT_FOUND_DIGEST)
+    expect(log).not.toHaveBeenCalled()
   })
 })
