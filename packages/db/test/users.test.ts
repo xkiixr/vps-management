@@ -1,14 +1,17 @@
 import { createHash } from 'node:crypto'
+import { inspect } from 'node:util'
 import { eq } from 'drizzle-orm'
 import { afterAll, beforeEach, expect, test, vi } from 'vitest'
 import {
   authenticate,
   createSession,
   createUser,
+  type Db,
   deleteSession,
   generatePassword,
   hashPassword,
   listUsers,
+  MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   purgeExpiredSessions,
   resolveSession,
@@ -63,6 +66,7 @@ async function activeAdminCount() {
 
 test('the policy constants have the agreed values', () => {
   expect(MIN_PASSWORD_LENGTH).toBe(12)
+  expect(MAX_PASSWORD_LENGTH).toBe(1024)
   expect(SESSION_TTL_MS).toBe(7 * DAY_MS)
   expect(SESSION_RENEW_BELOW_MS).toBe(6 * DAY_MS)
 })
@@ -86,8 +90,9 @@ test('generatePassword returns 20 random alphanumeric characters', () => {
 test('createUser lowercases email and refuses short passwords', async () => {
   const user = await createUser(db, { email: '  A@X.io ', name: 'Ann', role: 'admin', password: PASSWORD })
   expect(user).toMatchObject({ email: 'a@x.io', name: 'Ann', role: 'admin', disabledAt: null })
-  expect(user.passwordHash).toMatch(/^\$argon2id\$/)
-  expect(user.passwordHash).not.toContain(PASSWORD)
+  const [stored] = await db.select().from(users).where(eq(users.id, user.id))
+  expect(stored!.passwordHash).toMatch(/^\$argon2id\$/)
+  expect(stored!.passwordHash).not.toContain(PASSWORD)
 
   const error = await createUser(db, { email: 'b@x.io', name: 'Bob', role: 'member', password: 'short' }).catch(
     (e: unknown) => e,
@@ -391,4 +396,200 @@ test('a password from generatePassword is accepted by createUser and setPassword
   const next = generatePassword()
   await setPassword(db, u.id, next)
   expect(await authenticate(db, 'a@x.io', next)).not.toBeNull()
+})
+
+// --- password hashes never leave the module -------------------------------------------------------------
+
+test('createUser, authenticate, resolveSession and listUsers never return the password hash', async () => {
+  const created = await makeUser('a@x.io')
+  expect('passwordHash' in created).toBe(false)
+  expect(created).toEqual({
+    id: created.id,
+    email: 'a@x.io',
+    name: 'a',
+    role: 'member',
+    disabledAt: null,
+    createdAt: expect.any(Date),
+  })
+
+  const authenticated = await authenticate(db, 'a@x.io', PASSWORD)
+  expect(authenticated).not.toBeNull()
+  expect('passwordHash' in authenticated!).toBe(false)
+  expect(authenticated).toEqual(created)
+
+  const { token } = await createSession(db, created.id)
+  const resolved = await resolveSession(db, token)
+  expect(resolved).not.toBeNull()
+  expect('passwordHash' in resolved!.user).toBe(false)
+  expect(resolved!.user).toEqual(created)
+
+  const listed = await listUsers(db)
+  expect(listed).toHaveLength(1)
+  expect('passwordHash' in listed[0]!).toBe(false)
+  expect(listed[0]).toEqual(created)
+  expect(JSON.stringify([created, authenticated, resolved, listed])).not.toContain('argon2')
+})
+
+// A trigger makes the next INSERT/UPDATE on users fail inside Postgres, like a dropped connection or a
+// statement timeout would. Drizzle's own error for that embeds the statement parameters, hash included.
+async function withFailingTrigger<T>(event: 'INSERT' | 'UPDATE', fn: () => Promise<T>): Promise<T> {
+  await t.sql.unsafe(
+    `create or replace function vpsm_test_fail() returns trigger language plpgsql as $$ begin raise exception 'forced failure'; end $$`,
+  )
+  await t.sql.unsafe(`create trigger vpsm_test_fail before ${event} on users for each row execute function vpsm_test_fail()`)
+  try {
+    return await fn()
+  } finally {
+    await t.sql.unsafe('drop trigger vpsm_test_fail on users')
+  }
+}
+
+test('the failure injection really would leak a hash through a raw drizzle error', async () => {
+  const error = await withFailingTrigger('INSERT', () =>
+    db.insert(users).values({ email: 'a@x.io', name: 'a', role: 'member', passwordHash: '$argon2id$sentinel' }),
+  ).catch((e: unknown) => e)
+  expect(inspect(error)).toContain('$argon2id$sentinel')
+})
+
+test('createUser reports other database failures without the hash or a cause', async () => {
+  const error = await withFailingTrigger('INSERT', () => makeUser('a@x.io')).catch((e: unknown) => e)
+  expect(error).toBeInstanceOf(Error)
+  expect(error).not.toBeInstanceOf(ValidationError)
+  expect((error as Error).message).toBe('database error while creating user')
+  expect((error as Error).cause).toBeUndefined()
+  expect(inspect(error)).not.toContain('argon2')
+  expect(await listUsers(db)).toHaveLength(0)
+})
+
+test('setPassword reports other database failures without the hash or a cause', async () => {
+  const u = await makeUser('a@x.io')
+  const { token } = await createSession(db, u.id)
+  const error = await withFailingTrigger('UPDATE', () => setPassword(db, u.id, 'a brand new passphrase')).catch(
+    (e: unknown) => e,
+  )
+  expect(error).toBeInstanceOf(Error)
+  expect(error).not.toBeInstanceOf(ValidationError)
+  expect((error as Error).message).toBe('database error while setting password')
+  expect((error as Error).cause).toBeUndefined()
+  expect(inspect(error)).not.toContain('argon2')
+  // The failed change rolled back: old password and session still work.
+  expect(await authenticate(db, u.email, PASSWORD)).not.toBeNull()
+  expect(await resolveSession(db, token)).not.toBeNull()
+})
+
+// --- input hardening ---------------------------------------------------------------------------------
+
+test('createUser rejects control characters in email and name before touching the database', async () => {
+  const base = { email: 'a@x.io', name: 'Ann', role: 'member', password: PASSWORD } as const
+  for (const bad of ['\u0000', '\n', '\t', '\u001f', '\u007f']) {
+    const nameError = await createUser(db, { ...base, name: `Bob${bad}x` }).catch((e: unknown) => e)
+    expect(nameError).toBeInstanceOf(ValidationError)
+    expect((nameError as Error).message).toBe('name contains invalid characters')
+
+    const emailError = await createUser(db, { ...base, email: `a${bad}b@x.io` }).catch((e: unknown) => e)
+    expect(emailError).toBeInstanceOf(ValidationError)
+    expect((emailError as Error).message).toBe('email contains invalid characters')
+  }
+  // A trailing NUL is not whitespace, so trim() keeps it and it must still be rejected.
+  await expect(createUser(db, { ...base, name: 'Bob\u0000' })).rejects.toThrow('name contains invalid characters')
+  expect(await listUsers(db)).toHaveLength(0)
+})
+
+test('createUser and setPassword accept passwords up to 1024 characters and refuse longer ones', async () => {
+  const longest = 'p'.repeat(MAX_PASSWORD_LENGTH)
+  const u = await makeUser('a@x.io', 'member', longest)
+  expect(await authenticate(db, 'a@x.io', longest)).not.toBeNull()
+  await setPassword(db, u.id, `${longest.slice(1)}q`)
+
+  const tooLong = 'p'.repeat(MAX_PASSWORD_LENGTH + 1)
+  for (const attempt of [() => makeUser('b@x.io', 'member', tooLong), () => setPassword(db, u.id, tooLong)]) {
+    const error = await attempt().catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(ValidationError)
+    expect((error as Error).message).toBe('password must be at most 1024 characters')
+  }
+  expect(await listUsers(db)).toHaveLength(1)
+})
+
+test('createUser and setPassword refuse control characters in passwords, so every stored password can log in', async () => {
+  const u = await makeUser('a@x.io')
+  for (const bad of ['\u0000', '\n', '\t', '\u007f']) {
+    const password = `valid password${bad}`
+    for (const attempt of [() => makeUser('b@x.io', 'member', password), () => setPassword(db, u.id, password)]) {
+      const error = await attempt().catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(ValidationError)
+      expect((error as Error).message).toBe('password contains invalid characters')
+    }
+  }
+  expect(await listUsers(db)).toHaveLength(1)
+  expect(await authenticate(db, u.email, PASSWORD)).not.toBeNull()
+})
+
+test('authenticate returns null for control characters or oversized passwords without a query or a hash check', async () => {
+  const unusable = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error('the database must not be queried for rejected input')
+      },
+    },
+  ) as unknown as Db
+
+  for (const [email, password] of [
+    ['a@x.io', 'password\u0000'],
+    ['a@x.io', 'pass\nword12345'],
+    ['a\u0000@x.io', PASSWORD],
+    ['a@x.io\u007fx', PASSWORD],
+    ['a@x.io', 'p'.repeat(MAX_PASSWORD_LENGTH + 1)],
+  ] as const) {
+    expect(await authenticate(unusable, email, password)).toBeNull()
+  }
+  expect(verifySpy).not.toHaveBeenCalled()
+})
+
+// --- createSession -----------------------------------------------------------------------------------
+
+test('createSession refuses disabled and unknown users and stores nothing', async () => {
+  await makeUser('admin@x.io', 'admin')
+  const u = await makeUser('a@x.io')
+  await setUserDisabled(db, u.id, true)
+
+  const disabled = await createSession(db, u.id).catch((e: unknown) => e)
+  expect(disabled).toBeInstanceOf(ValidationError)
+  expect((disabled as Error).message).toBe('user is disabled')
+
+  for (const id of ['00000000-0000-4000-8000-000000000000', 'not-a-uuid']) {
+    const unknown = await createSession(db, id).catch((e: unknown) => e)
+    expect(unknown).toBeInstanceOf(ValidationError)
+    expect((unknown as Error).message).toBe('user not found')
+  }
+  expect(await sessionIds()).toEqual([])
+
+  await setUserDisabled(db, u.id, false)
+  expect((await createSession(db, u.id)).token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+  expect(await sessionIds()).toHaveLength(1)
+})
+
+test('createSession waits for an in-flight disable and then refuses, so no session outlives it', async () => {
+  const u = await makeUser('a@x.io')
+  let signalLocked!: () => void
+  const locked = new Promise<void>((resolve) => (signalLocked = resolve))
+  let release!: () => void
+  const released = new Promise<void>((resolve) => (release = resolve))
+  const disabling = t.sql.begin(async (tx) => {
+    await tx`update users set disabled_at = now() where id = ${u.id}`
+    signalLocked()
+    await released
+  })
+  await locked
+
+  const creating = createSession(db, u.id).catch((e: unknown) => e)
+  const early = await Promise.race([creating, new Promise((resolve) => setTimeout(() => resolve('pending'), 300))])
+  expect(early).toBe('pending')
+
+  release()
+  await disabling
+  const error = await creating
+  expect(error).toBeInstanceOf(ValidationError)
+  expect((error as Error).message).toBe('user is disabled')
+  expect(await sessionIds()).toEqual([])
 })

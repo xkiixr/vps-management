@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomInt } from 'node:crypto'
 import { hash, verify } from '@node-rs/argon2'
-import { and, asc, eq, gt, isNull, lte } from 'drizzle-orm'
+import { and, asc, eq, getTableColumns, gt, isNull, lte, sql } from 'drizzle-orm'
 import type { Db } from './client'
 import { ValidationError, violatedUniqueConstraint } from './errors'
 import { sessions, type User, users } from './schema'
 
 export const MIN_PASSWORD_LENGTH = 12
+export const MAX_PASSWORD_LENGTH = 1024
 export const SESSION_TTL_MS = 7 * 24 * 3600_000
 // A session with less than this much life left is extended to a full SESSION_TTL_MS when it is used.
 export const SESSION_RENEW_BELOW_MS = 6 * 24 * 3600_000
@@ -13,10 +14,16 @@ export const SESSION_RENEW_BELOW_MS = 6 * 24 * 3600_000
 type Role = User['role']
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
 
+// A user as seen outside this module. The password hash is only ever read by authenticate(), never returned.
+export type SafeUser = Omit<User, 'passwordHash'>
+const { passwordHash: _passwordHash, ...safeUserColumns } = getTableColumns(users)
+
 const GENERATED_PASSWORD_LENGTH = 20
 const PASSWORD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// C0 control characters and DEL. NUL in particular makes Postgres reject the whole statement.
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 const LAST_ADMIN_MESSAGE = 'at least one active admin is required'
 
 // --- passwords ---------------------------------------------------------------------------------------
@@ -42,10 +49,16 @@ export function generatePassword(): string {
   return password
 }
 
-function assertPasswordLength(password: string): void {
+// Control characters are refused when a password is set (not only at login) so that every stored password
+// is one authenticate() will accept.
+function assertValidPassword(password: string): void {
   if (password.length < MIN_PASSWORD_LENGTH) {
     throw new ValidationError(`password must be at least ${MIN_PASSWORD_LENGTH} characters`)
   }
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    throw new ValidationError(`password must be at most ${MAX_PASSWORD_LENGTH} characters`)
+  }
+  if (CONTROL_CHARACTERS.test(password)) throw new ValidationError('password contains invalid characters')
 }
 
 // authenticate() verifies against this when the email is unknown, so "no such user" costs about as much as
@@ -74,59 +87,81 @@ function assertUserId(userId: string): void {
   if (!UUID_PATTERN.test(userId)) throw new ValidationError('user not found')
 }
 
+// Drizzle's query errors put the statement *parameters* in their message, and util.inspect prints the `cause`
+// chain, so an unexpected failure of a statement that carries a password hash would write the hash to logs.
+// Those failures are replaced by this error, which keeps neither.
+function databaseError(operation: string): Error {
+  return new Error(`database error while ${operation}`)
+}
+
 export async function createUser(
   db: Db,
   i: { email: string; name: string; role: Role; password: string },
-): Promise<User> {
+): Promise<SafeUser> {
   const email = normalizeEmail(i.email)
+  if (CONTROL_CHARACTERS.test(email)) throw new ValidationError('email contains invalid characters')
   if (!EMAIL_PATTERN.test(email)) throw new ValidationError(`invalid email address "${email}"`)
   const name = i.name.trim()
+  if (CONTROL_CHARACTERS.test(name)) throw new ValidationError('name contains invalid characters')
   if (name === '') throw new ValidationError('name is required')
   assertRole(i.role)
-  assertPasswordLength(i.password)
+  assertValidPassword(i.password)
 
   const passwordHash = await hashPassword(i.password)
   try {
-    const [user] = await db.insert(users).values({ email, name, passwordHash, role: i.role }).returning()
+    const [user] = await db
+      .insert(users)
+      .values({ email, name, passwordHash, role: i.role })
+      .returning(safeUserColumns)
     return user!
   } catch (error) {
     if (violatedUniqueConstraint(error) === 'users_email_unique') {
       throw new ValidationError('a user with this email already exists')
     }
-    throw error
+    throw databaseError('creating user')
   }
 }
 
-export function listUsers(db: Db): Promise<User[]> {
-  return db.select().from(users).orderBy(asc(users.email))
+export function listUsers(db: Db): Promise<SafeUser[]> {
+  return db.select(safeUserColumns).from(users).orderBy(asc(users.email))
 }
 
 // Replaces the password and ends every session of that user, so a stolen session dies with the old password.
 export async function setPassword(db: Db, userId: string, password: string): Promise<void> {
-  assertPasswordLength(password)
+  assertValidPassword(password)
   assertUserId(userId)
   const passwordHash = await hashPassword(password)
-  await db.transaction(async (tx) => {
-    const updated = await tx.update(users).set({ passwordHash }).where(eq(users.id, userId)).returning({ id: users.id })
-    if (updated.length === 0) throw new ValidationError('user not found')
-    await tx.delete(sessions).where(eq(sessions.userId, userId))
-  })
+  try {
+    await db.transaction(async (tx) => {
+      const updated = await tx
+        .update(users)
+        .set({ passwordHash })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id })
+      if (updated.length === 0) throw new ValidationError('user not found')
+      await tx.delete(sessions).where(eq(sessions.userId, userId))
+    })
+  } catch (error) {
+    if (error instanceof ValidationError) throw error
+    throw databaseError('setting password')
+  }
 }
 
-const isActiveAdmin = (user: User) => user.role === 'admin' && user.disabledAt === null
+const isActiveAdmin = (user: SafeUser) => user.role === 'admin' && user.disabledAt === null
 
 // Locks every active admin row (in id order, so concurrent callers cannot deadlock each other) and then the
 // target row. Two requests that would each leave the other as the only admin therefore run one after the
-// other, and the second sees the first's result. Returns the locked target and how many *other* active admins
-// there are.
-async function lockUserAndAdmins(tx: Tx, userId: string): Promise<{ target: User; otherActiveAdmins: number }> {
+// other, and the second sees the first's result. NO KEY UPDATE is enough: it conflicts with itself and with
+// the UPDATEs below, but not with the KEY SHARE lock that inserting a session takes on the user row.
+// Returns the locked target and how many *other* active admins there are.
+async function lockUserAndAdmins(tx: Tx, userId: string): Promise<{ target: SafeUser; otherActiveAdmins: number }> {
   const admins = await tx
     .select({ id: users.id })
     .from(users)
     .where(and(eq(users.role, 'admin'), isNull(users.disabledAt)))
     .orderBy(asc(users.id))
-    .for('update')
-  const [target] = await tx.select().from(users).where(eq(users.id, userId)).for('update')
+    .for('no key update')
+  const [target] = await tx.select(safeUserColumns).from(users).where(eq(users.id, userId)).for('no key update')
   if (!target) throw new ValidationError('user not found')
   return { target, otherActiveAdmins: admins.filter((admin) => admin.id !== target.id).length }
 }
@@ -158,11 +193,22 @@ export async function setUserDisabled(db: Db, userId: string, disabled: boolean)
 }
 
 // Returns null for an unknown email, a wrong password and a disabled account alike (callers must not be able
-// to tell which). Never throws for bad credentials.
-export async function authenticate(db: Db, email: string, password: string): Promise<User | null> {
-  const [user] = await db.select().from(users).where(eq(users.email, normalizeEmail(email)))
-  const passwordMatches = await verifyPassword(user ? user.passwordHash : await getDummyHash(), password)
-  return user && passwordMatches && user.disabledAt === null ? user : null
+// to tell which). Never throws for bad credentials. Input that no stored email or password can contain
+// (control characters, oversized passwords) is rejected before the database or argon2 is touched.
+export async function authenticate(db: Db, email: string, password: string): Promise<SafeUser | null> {
+  const normalizedEmail = normalizeEmail(email)
+  if (CONTROL_CHARACTERS.test(normalizedEmail) || CONTROL_CHARACTERS.test(password)) return null
+  if (password.length > MAX_PASSWORD_LENGTH) return null
+
+  const [row] = await db
+    .select({ ...safeUserColumns, passwordHash: users.passwordHash })
+    .from(users)
+    .where(eq(users.email, normalizedEmail))
+  const passwordMatches = await verifyPassword(row ? row.passwordHash : await getDummyHash(), password)
+  if (!row || !passwordMatches) return null
+
+  const { passwordHash: _hash, ...user } = row
+  return user.disabledAt === null ? user : null
 }
 
 // --- sessions ----------------------------------------------------------------------------------------
@@ -170,20 +216,33 @@ export async function authenticate(db: Db, email: string, password: string): Pro
 // The session row id is the SHA-256 of the token: a leaked database cannot be replayed as cookies.
 const sessionIdOf = (token: string) => createHash('sha256').update(token).digest('hex')
 
+// The row is inserted by one statement that selects the user, so a user who does not exist or is disabled gets
+// no session. FOR SHARE makes it wait for an in-flight setUserDisabled() on the same user and then re-check.
 export async function createSession(db: Db, userId: string): Promise<{ token: string; expiresAt: Date }> {
+  assertUserId(userId)
   const token = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS)
-  await db.insert(sessions).values({ id: sessionIdOf(token), userId, expiresAt })
+  const inserted = await db.execute(sql`
+    insert into sessions (id, user_id, expires_at)
+    select ${sessionIdOf(token)}, u.id, ${expiresAt.toISOString()}::timestamptz
+    from users u
+    where u.id = ${userId} and u.disabled_at is null
+    for share of u
+    returning id`)
+  if (inserted.length === 0) {
+    const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId))
+    throw new ValidationError(user ? 'user is disabled' : 'user not found')
+  }
   return { token, expiresAt }
 }
 
 export async function resolveSession(
   db: Db,
   token: string,
-): Promise<{ user: User; sessionId: string; expiresAt: Date; renewed: boolean } | null> {
+): Promise<{ user: SafeUser; sessionId: string; expiresAt: Date; renewed: boolean } | null> {
   const sessionId = sessionIdOf(token)
   const [row] = await db
-    .select({ expiresAt: sessions.expiresAt, user: users })
+    .select({ expiresAt: sessions.expiresAt, user: safeUserColumns })
     .from(sessions)
     .innerJoin(users, eq(sessions.userId, users.id))
     .where(eq(sessions.id, sessionId))
