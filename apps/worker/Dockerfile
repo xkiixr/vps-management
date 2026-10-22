@@ -41,6 +41,8 @@ RUN case "${TARGETARCH}" in \
     esac \
  && curl -fsSL "https://github.com/railwayapp/railpack/releases/download/v${RAILPACK_VERSION}/railpack-v${RAILPACK_VERSION}-${arch}-unknown-linux-musl.tar.gz" \
     | tar -xz -C /usr/local/bin railpack
+# Fails the build when the asset is missing, truncated or for the wrong architecture.
+RUN railpack --version
 
 WORKDIR /app
 # /out also holds a copy of the worker's sources; only the production node_modules and package.json

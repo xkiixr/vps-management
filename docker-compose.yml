@@ -51,6 +51,8 @@ services:
       dockerfile: apps/worker/Dockerfile
     container_name: vpsm-worker
     restart: unless-stopped
+    # A minimal init as PID 1 reaps the git, railpack and docker processes the worker spawns.
+    init: true
     mem_limit: 768m
     stop_grace_period: 60s
     env_file: .env

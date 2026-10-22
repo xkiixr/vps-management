@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { eq } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { networkName } from '@vpsm/core'
 import {
   claimNextDeployment,
   createAppService,
@@ -21,6 +22,7 @@ const t = await setupTestDb()
 const { db } = t
 let deps: FakeDeps
 let instanceId: string
+let appNetwork: string
 
 afterAll(() => t.close())
 beforeEach(async () => {
@@ -33,7 +35,9 @@ beforeEach(async () => {
     appsDomain: 'apps.example.com',
   })
   instanceId = instance.id
+  appNetwork = networkName(instance.environmentId)
   deps = fakeDeps(db)
+  await deps.docker.ensureNetwork(appNetwork)
 })
 afterEach(() => {
   fs.rmSync(deps.config.workDir, { recursive: true, force: true })
@@ -104,6 +108,23 @@ test('starts live containers that are stopped (e.g. after a host reboot) and mar
 
   expect(deps.events).toEqual(['restart vpsm-web-live0000', 'routes'])
   expect((await get(stopped)).status).toBe('SUCCESS')
+})
+
+test('reconnects Traefik and the worker to the network of a live deployment before the routes are rewritten', async () => {
+  const liveOne = await live('vpsm-web-live0000')
+  seed('vpsm-web-live0000', liveOne.id)
+  let connectionsWhenRouting: [string, string][] | undefined
+  deps.regenerateRoutes = async () => {
+    connectionsWhenRouting = [...deps.docker.connections]
+    deps.events.push('routes')
+  }
+
+  await recoverInterruptedDeployments(deps)
+
+  expect(connectionsWhenRouting).toEqual([
+    ['vpsm-traefik', appNetwork],
+    ['vpsm-worker', appNetwork],
+  ])
 })
 
 test('a live deployment whose container vanished is CRASHED before the routes are rewritten', async () => {

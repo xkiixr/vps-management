@@ -37,7 +37,7 @@
 *.apps.example.com   A   <IP ของ VPS>
 ```
 
-แอปแต่ละตัวจะได้ URL `https://<service>-<project>.apps.example.com` เช่น service `hello` ใน project `demo` ได้ `https://hello-demo.apps.example.com` ใบรับรอง Let's Encrypt ออกให้ทีละชื่อโดยอัตโนมัติตอนมีคนเข้าครั้งแรก (ครั้งแรกอาจช้ากว่าปกติสักครู่) และมีเพดานการออกใบรับรองต่อสัปดาห์ของ Let's Encrypt จึงไม่ควรสร้าง/ลบ service ถี่ๆ เพื่อทดลอง
+แอปแต่ละตัวจะได้ URL `https://<service>-<project>.apps.example.com` เช่น service `hello` ใน project `demo` ได้ `https://hello-demo.apps.example.com` Traefik ขอใบรับรอง Let's Encrypt ให้ทีละชื่อโดยอัตโนมัติ **ทันทีที่ route โหลดเข้า Traefik ซึ่งคือหลัง deployment ขึ้น live** (ไม่ได้รอให้มีคนเข้าเว็บ) ดังนั้น **ต้องตั้ง DNS `*.apps.example.com` ให้ชี้มาที่ VPS และ port 80 เข้าถึงได้ก่อน deploy ครั้งแรก** ไม่เช่นนั้นการขอใบรับรองจะล้มเหลวและเว็บจะขึ้นใบรับรองที่ไม่ถูกต้อง Let's Encrypt มีเพดานการออกใบรับรองต่อสัปดาห์ จึงไม่ควรสร้าง/ลบ service ถี่ๆ เพื่อทดลอง
 
 ตรวจว่า DNS ใช้ได้ก่อนติดตั้ง:
 
@@ -54,6 +54,8 @@ sudo bash deploy/install-ubuntu.sh
 ```
 
 สคริปต์ติดตั้ง Docker Engine (จาก `https://get.docker.com`) และตั้ง ufw ให้เปิดเฉพาะ SSH, 80/tcp และ 443/tcp (ช่วง port 30000–32767 จะเปิดในแผน 4) สคริปต์ต้องรันด้วย root, รันซ้ำได้ และไม่พิมพ์ค่า secret ใดๆ
+
+> **ระวังก่อนรันสคริปต์:** `ufw allow OpenSSH` เปิดเฉพาะ port 22 ถ้า sshd บนเครื่องใช้ port อื่น ให้เปิด port จริงก่อน (เช่น `sudo ufw allow 2222/tcp`) แล้วค่อยรันสคริปต์ ไม่เช่นนั้นเมื่อ `ufw --force enable` ทำงานคุณจะเข้า SSH ไม่ได้อีก
 
 ## 3. ตั้งค่า `.env`
 
@@ -85,6 +87,8 @@ docker compose logs worker
 ```
 
 ผลที่ถูกต้อง: `postgres` เป็น `healthy`, `traefik` และ `worker` เป็น `running`; log ของ worker มี `buildx: vpsm-builder`, `recovery: 0 interrupted deployment(s) …` และ `worker started` โดยไม่มีบรรทัด error (การ migrate ฐานข้อมูลทำเองตอน worker เริ่ม)
+
+worker ลงทะเบียน builder `vpsm-builder` (จำกัด memory 3 GB และ CPU 3 core) **ตอนเริ่มทำงาน** ไม่ใช่ตอน build ครั้งแรก บรรทัด `buildx: vpsm-builder` คือผลของการลงทะเบียนนี้ และจะปรากฏอีกทุกครั้งที่ container ของ worker ถูกสร้างใหม่ (ตรวจได้ด้วย `docker compose exec worker docker buildx ls`) ส่วน container ของ BuildKit จะเริ่มจริงตอน build ครั้งแรก
 
 ## 5. คำสั่ง CLI
 
@@ -128,6 +132,7 @@ git pull && docker compose up -d --build
 ```
 
 - แอปของผู้ใช้เป็น container แยก จึงยังรันต่อระหว่างอัปเดต
+- ถ้า `docker compose up -d --build` สร้าง Traefik ใหม่ (เช่น เปลี่ยน image หรือ config) container ใหม่จะหลุดจาก network ของแอปทุกตัว worker จะต่อ Traefik กลับเข้า network ของแอปที่ live อยู่ให้เองภายในประมาณ 60 วินาที (และตอน worker เริ่มทำงาน) ช่วงนั้นเว็บอาจตอบ 502 หรือ 404 สั้นๆ ไม่ต้อง deploy ใหม่
 - ถ้าอัปเดตขณะมี deployment กำลัง build อยู่ worker จะถูกสร้างใหม่ และ deployment นั้นถูกตั้งเป็น `FAILED` (`worker restarted during deployment`) ให้สั่ง `deploy <project> <service>` ใหม่หลัง worker กลับมา ควรอัปเดตตอนไม่มีงานค้าง (ดูด้วย `status <project>`)
 - `docker compose down` ไม่ลบข้อมูล แต่ **`docker compose down -v` ลบ volume ทั้งหมดรวมฐานข้อมูลและใบรับรอง** ห้ามใช้บน VPS จริง
 
@@ -148,7 +153,7 @@ docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.sql
 | deployment เป็น `FAILED` | `logs <deploymentId>` (id อยู่ในบรรทัด `queued deployment <id>`); เหตุผลของ deployment ที่ถูกขัดจังหวะดูได้จาก `docker compose exec postgres psql -U postgres -c "select status, failure_reason from deployments order by created_at desc limit 5"` |
 | HTTPS ได้ใบรับรองผิด/ขึ้นเตือน | `docker compose logs traefik` ตรวจ DNS ว่าชี้ถูก และ port 80 เข้าถึงได้จากภายนอก |
 | ดู container ของแอปที่ระบบจัดการ | `docker ps --filter label=vpsm.managed=true` |
-| ดูเพดาน memory ของ builder | `docker inspect buildx_buildkit_vpsm-builder0 --format '{{.HostConfig.Memory}}'` ต้องได้ `3221225472` (3 GB; builder ถูกสร้างตอน build ครั้งแรก) |
+| ดูเพดาน memory ของ builder | `docker inspect buildx_buildkit_vpsm-builder0 --format '{{.HostConfig.Memory}}'` ต้องได้ `3221225472` (3 GB; container ของ BuildKit เริ่มตอน build ครั้งแรก จึงตรวจได้หลัง deploy ครั้งแรกเท่านั้น) |
 
 ## 10. รายการตรวจหลังติดตั้งบน VPS จริง
 

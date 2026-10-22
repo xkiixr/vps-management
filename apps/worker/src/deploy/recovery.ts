@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { and, eq, inArray, isNotNull, or } from 'drizzle-orm'
 import { deployments, setDeploymentStatus } from '@vpsm/db'
+import { ensureNetworkAttachments } from '../monitor/network-attachments'
 import { reconcileLiveDeployments } from '../monitor/reconcile'
 import type { PipelineDeps } from './pipeline'
 
@@ -14,8 +15,10 @@ const INTERRUPTED_REASON = 'worker restarted during deployment'
  * 2. the work directory is emptied (a crash can leave a clone with the token in it);
  * 3. live deployments are reconciled: stopped containers are started again (e.g. after a host reboot),
  *    vanished ones CRASHED;
- * 4. the routes file is rewritten from the database, so no route points at an orphan any more;
- * 5. managed containers whose deployment is not SUCCESS or CRASHED (or no longer exists) are removed.
+ * 4. Traefik and the worker are connected again to the networks of live deployments (a recreated
+ *    container has lost them);
+ * 5. the routes file is rewritten from the database, so no route points at an orphan any more;
+ * 6. managed containers whose deployment is not SUCCESS or CRASHED (or no longer exists) are removed.
  */
 export async function recoverInterruptedDeployments(
   deps: PipelineDeps,
@@ -37,6 +40,8 @@ export async function recoverInterruptedDeployments(
 
   await emptyWorkDir(deps.config.workDir)
   await reconcileLiveDeployments(deps, { startStopped: true })
+  // Traefik may have been recreated since the last deployment, which detaches it from every app network.
+  await ensureNetworkAttachments(deps)
   await deps.regenerateRoutes()
 
   const current = await db

@@ -10,6 +10,7 @@ import { recoverInterruptedDeployments } from './deploy/recovery'
 import { runCommand } from './exec'
 import { cleanupImages } from './images/retention'
 import { startCrashMonitor } from './monitor/crash-monitor'
+import { ensureNetworkAttachments } from './monitor/network-attachments'
 import { regenerateRoutes } from './routing/active-routes'
 import { createDockerRuntime } from './runtime/docker-runtime'
 import { waitHealthy } from './runtime/healthcheck'
@@ -17,6 +18,9 @@ import { fetchSource } from './source/fetch-source'
 
 /** Compose allows 60 s to stop; what is still running after this is marked FAILED on the next start. */
 const SHUTDOWN_GRACE_MS = 50_000
+
+/** How often Traefik and the worker are reconnected to the networks of live apps (see `ensureNetworkAttachments`). */
+const ATTACHMENT_CHECK_MS = 60_000
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
@@ -55,6 +59,18 @@ async function main(): Promise<void> {
 
   const controller = new AbortController()
   startCrashMonitor(deps, controller.signal)
+  // A recreated Traefik container loses its networks; this puts it back on them without a deployment.
+  let checkingAttachments = false
+  const attachments = setInterval(() => {
+    if (checkingAttachments) return
+    checkingAttachments = true
+    ensureNetworkAttachments(deps)
+      .catch((error: unknown) => console.error(`network attachments: ${messageOf(error)}`))
+      .finally(() => {
+        checkingAttachments = false
+      })
+  }, ATTACHMENT_CHECK_MS)
+  attachments.unref()
   const listen = async (channel: string, onNotify: () => void) => (await sql.listen(channel, () => onNotify())).unlisten
   const loop = startDeployLoop({ ...deps, listen }, controller.signal)
   console.log('worker started')
@@ -67,6 +83,7 @@ async function main(): Promise<void> {
   const received = await Promise.race([stopRequested, loop])
   console.log(`${received}: shutting down`)
   controller.abort()
+  clearInterval(attachments)
   const finished = await Promise.race([loop.then(() => true), sleep(SHUTDOWN_GRACE_MS, false, { ref: false })])
   if (!finished) console.error('the running deployment did not finish in time; it is marked FAILED on the next start')
   await close()
