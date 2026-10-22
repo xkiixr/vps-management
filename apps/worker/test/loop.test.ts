@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import { eq } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
+  CLEANUP_CHANNEL,
   createAppService,
   createProject,
   type Deployment,
@@ -12,6 +13,7 @@ import {
 import { setupTestDb } from '@vpsm/db/testing'
 import { startDeployLoop } from '../src/deploy/loop'
 import { runDeployment } from '../src/deploy/pipeline'
+import { sweepOrphans } from '../src/maintenance/sweep'
 import { fakeDeps, type FakeDeps } from './fakes'
 
 // What every claimNextDeployment call returned (`null` = queue empty). `failNext` makes the next call throw;
@@ -44,6 +46,7 @@ vi.mock('@vpsm/db', async (importOriginal) => {
 })
 
 vi.mock('../src/deploy/pipeline', () => ({ runDeployment: vi.fn() }))
+vi.mock('../src/maintenance/sweep', () => ({ sweepOrphans: vi.fn() }))
 
 const t = await setupTestDb()
 const { db } = t
@@ -53,7 +56,7 @@ let controller: AbortController
 let loop: Promise<void> | undefined
 /** The loop's LISTEN subscriptions: channel, callback, and whether it was unlistened. */
 let listeners: { channel: string; notify: () => void; unlistened: boolean }[]
-/** `start <service>` / `end <service>` for every fake runDeployment, in order. */
+/** In order: `start <service>` / `end <service>` for every fake runDeployment, `start sweep` / `end sweep` for every sweep. */
 let order: string[]
 let concurrent: number
 let maxConcurrent: number
@@ -95,6 +98,8 @@ beforeEach(async () => {
   clock = Date.parse('2026-10-01T00:00:00Z')
   vi.mocked(runDeployment).mockReset()
   fakeRun(async () => new Promise((r) => setTimeout(r, 50)))
+  vi.mocked(sweepOrphans).mockReset()
+  fakeSweep(async () => {})
 })
 afterEach(async () => {
   controller.abort()
@@ -104,20 +109,32 @@ afterEach(async () => {
   fs.rmSync(deps.config.workDir, { recursive: true, force: true })
 })
 
-/** runDeployment records start/end around `body` (keyed by service name) and tracks concurrency. */
+/** Records `start <what>` / `end <what>` around `body` and tracks how many run at once. */
+async function track<T>(what: string, body: () => Promise<T>): Promise<T> {
+  concurrent++
+  maxConcurrent = Math.max(maxConcurrent, concurrent)
+  order.push(`start ${what}`)
+  try {
+    return await body()
+  } finally {
+    order.push(`end ${what}`)
+    concurrent--
+  }
+}
+
+/** runDeployment runs `body` (keyed by service name), tracked as `start <service>` / `end <service>`. */
 function fakeRun(body: (service: string) => Promise<void>) {
   vi.mocked(runDeployment).mockImplementation(async (id) => {
     const service = await serviceOf(id)
-    concurrent++
-    maxConcurrent = Math.max(maxConcurrent, concurrent)
-    order.push(`start ${service}`)
-    try {
-      await body(service)
-    } finally {
-      order.push(`end ${service}`)
-      concurrent--
-    }
+    await track(service, () => body(service))
   })
+}
+
+const NOTHING_REMOVED = { containers: 0, networks: 0, images: 0 }
+
+/** sweepOrphans runs `body`, tracked as `start sweep` / `end sweep`, and returns its result (by default: nothing removed). */
+function fakeSweep(body: () => Promise<Awaited<ReturnType<typeof sweepOrphans>> | void>) {
+  vi.mocked(sweepOrphans).mockImplementation(() => track('sweep', async () => (await body()) ?? NOTHING_REMOVED))
 }
 
 async function serviceOf(deploymentId: string): Promise<string> {
@@ -171,7 +188,7 @@ test('processes queued deployments one at a time in order', async () => {
 test('wakes up on notify', async () => {
   start()
   await idle()
-  expect(listeners.map((l) => l.channel)).toEqual([DEPLOYMENTS_CHANNEL])
+  expect(listeners.map((l) => l.channel)).toEqual([DEPLOYMENTS_CHANNEL, CLEANUP_CHANNEL])
 
   const d = await queue('web')
   listeners[0]!.notify()
@@ -247,7 +264,7 @@ test('stops claiming once aborted and lets the running deployment finish', async
   controller.abort()
   await new Promise((r) => setTimeout(r, 50))
   expect(stopped).toBe(false)
-  expect(listeners[0]!.unlistened).toBe(true)
+  expect(listeners.map((l) => l.unlistened)).toEqual([true, true])
 
   release.resolve()
   await loop
@@ -272,6 +289,157 @@ test('a failed claim is reported and the next wake-up carries on', async () => {
   const d = await queue('web')
   listeners[0]!.notify()
   await vi.waitFor(() => expect(runDeployment).toHaveBeenCalledWith(d.id, deps))
+})
+
+describe('orphan sweep', () => {
+  const deploymentsListener = () => listeners.find((l) => l.channel === DEPLOYMENTS_CHANNEL)!
+  const cleanupListener = () => listeners.find((l) => l.channel === CLEANUP_CHANNEL)!
+  const settle = () => new Promise((r) => setTimeout(r, 50))
+
+  test('runs when the cleanup channel is notified', async () => {
+    start()
+    await idle()
+    expect(sweepOrphans).not.toHaveBeenCalled()
+
+    cleanupListener().notify()
+
+    await vi.waitFor(() => expect(sweepOrphans).toHaveBeenCalledExactlyOnceWith(deps))
+  })
+
+  test('runs every 60 seconds', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    start()
+    await idle()
+
+    // vi.waitFor (in idle) advances the fake clock a little too.
+    vi.advanceTimersByTime(30_000)
+    await settle()
+    expect(sweepOrphans).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(30_000)
+    await vi.waitFor(() => expect(sweepOrphans).toHaveBeenCalledOnce())
+  })
+
+  test('a sweep requested while a deployment runs starts only after it, before the next deployment is claimed', async () => {
+    const release = deferred()
+    fakeRun(async (service) => {
+      if (service === 'web') await release.promise
+    })
+    await queue('web')
+    await queue('api')
+    start()
+    await vi.waitFor(() => expect(order).toEqual(['start web']))
+
+    cleanupListener().notify()
+    await settle()
+    expect(sweepOrphans).not.toHaveBeenCalled()
+
+    release.resolve()
+    await vi.waitFor(() =>
+      expect(order).toEqual(['start web', 'end web', 'start sweep', 'end sweep', 'start api', 'end api']),
+    )
+    expect(maxConcurrent).toBe(1)
+  })
+
+  test('no deployment is claimed while a sweep runs', async () => {
+    const release = deferred()
+    fakeSweep(() => release.promise)
+    start()
+    await idle()
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(order).toEqual(['start sweep']))
+
+    const claimed = claims.results.length
+    await queue('web')
+    deploymentsListener().notify()
+    await settle()
+    expect(claims.results).toHaveLength(claimed)
+    expect(runDeployment).not.toHaveBeenCalled()
+
+    release.resolve()
+    await vi.waitFor(() => expect(order).toEqual(['start sweep', 'end sweep', 'start web', 'end web']))
+    expect(maxConcurrent).toBe(1)
+  })
+
+  test('requests that arrive while busy lead to a single sweep', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const release = deferred()
+    fakeRun(async () => release.promise)
+    await queue('web')
+    start()
+    await vi.waitFor(() => expect(order).toEqual(['start web']))
+
+    cleanupListener().notify()
+    cleanupListener().notify()
+    vi.advanceTimersByTime(60_000)
+    release.resolve()
+
+    await vi.waitFor(() => expect(order).toEqual(['start web', 'end web', 'start sweep', 'end sweep']))
+    await idle()
+    await settle()
+    expect(sweepOrphans).toHaveBeenCalledOnce()
+  })
+
+  test('logs a one-line summary only when something was removed', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.mocked(sweepOrphans)
+      .mockResolvedValueOnce({ containers: 0, networks: 0, images: 0 })
+      .mockResolvedValueOnce({ containers: 1, networks: 1, images: 2 })
+    start()
+    await idle()
+
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(sweepOrphans).toHaveBeenCalledOnce())
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(log).toHaveBeenCalled())
+
+    expect(sweepOrphans).toHaveBeenCalledTimes(2)
+    expect(log).toHaveBeenCalledExactlyOnceWith('orphan sweep: removed 1 container(s), 1 network(s), 2 image(s)')
+  })
+
+  test('a failing sweep is reported and deployments carry on', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(sweepOrphans).mockRejectedValueOnce(new Error('connection refused'))
+    start()
+    await idle()
+
+    cleanupListener().notify()
+    await vi.waitFor(() => expect(error).toHaveBeenCalledOnce())
+    expect(String(error.mock.calls[0]![0])).toContain('orphan sweep: connection refused')
+
+    const d = await queue('web')
+    deploymentsListener().notify()
+    await vi.waitFor(() => expect(runDeployment).toHaveBeenCalledWith(d.id, deps))
+  })
+
+  test('stops sweeping once aborted', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    start()
+    await idle()
+
+    controller.abort()
+    await loop
+    cleanupListener().notify()
+    vi.advanceTimersByTime(60_000)
+    await settle()
+
+    expect(cleanupListener().unlistened).toBe(true)
+    expect(sweepOrphans).not.toHaveBeenCalled()
+  })
+
+  test('if listening on the cleanup channel fails, the deployments channel is released again', async () => {
+    const listen = deps.listen
+    deps.listen = async (channel, notify) => {
+      if (channel === CLEANUP_CHANNEL) throw new Error('too many connections')
+      return listen(channel, notify)
+    }
+
+    const started = start()
+    loop = started.catch(() => undefined) // afterEach awaits it
+    await expect(started).rejects.toThrow('too many connections')
+    expect(listeners.map((l) => [l.channel, l.unlistened])).toEqual([[DEPLOYMENTS_CHANNEL, true]])
+    expect(claims.results).toEqual([])
+  })
 })
 
 describe('when already aborted', () => {

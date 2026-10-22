@@ -40,12 +40,25 @@ export interface DockerRuntime {
   listManaged(): Promise<ManagedContainer[]>
   imageExists(tag: string): Promise<boolean>
   removeImage(tag: string): Promise<void>
+  /** The names of the app networks (`vpsm-env-...`), whatever their environment. */
+  listManagedNetworks(): Promise<string[]>
+  /** Force-disconnects every container from the network, then removes it. A missing network is not an error. */
+  removeNetwork(name: string): Promise<void>
+  /** Every `vpsm/...` tag of every image; untagged images are left out. */
+  listManagedImages(): Promise<string[]>
   /**
    * Calls `cb(name)` whenever a managed container's main process exits. Returns
    * the unsubscribe function. `onError` hears about a failed or broken event stream (no reconnect).
    */
   onContainerDie(cb: (name: string) => void, onError?: (err: Error) => void): () => void
 }
+
+/** Prefixes of the names `networkName` and `imageTag` (in @vpsm/core) give app networks and images. */
+const MANAGED_NETWORK_PREFIX = 'vpsm-env-'
+const MANAGED_IMAGE_PREFIX = 'vpsm/'
+
+/** What the daemon answers (500, older versions 403) when a container is not on the network. */
+const NOT_CONNECTED = /is not connected to( the)? network/
 
 const MISSING_STATE: ContainerState = {
   exists: false,
@@ -100,8 +113,8 @@ export function createDockerRuntime(docker: Dockerode = new Dockerode()): Docker
       try {
         await network.disconnect({ Container: containerName })
       } catch (err) {
-        // The daemon answers 500 (older versions 403) with this message; anything else is real.
-        if (!/is not connected to( the)? network/.test(messageOf(err))) throw err
+        // Not on that network yet is fine; anything else is real.
+        if (!NOT_CONNECTED.test(messageOf(err))) throw err
       }
       await network.connect({ Container: containerName, EndpointConfig: { Aliases: aliases } })
     },
@@ -177,6 +190,33 @@ export function createDockerRuntime(docker: Dockerode = new Dockerode()): Docker
         // 404: already gone; 409: still used by a container (or another tag family).
         if (statusCode(err) !== 404 && statusCode(err) !== 409) throw err
       }
+    },
+
+    async listManagedNetworks() {
+      const networks = await docker.listNetworks()
+      return networks.map((n) => n.Name).filter((name) => name.startsWith(MANAGED_NETWORK_PREFIX))
+    },
+
+    async removeNetwork(name) {
+      const network = docker.getNetwork(name)
+      const info = await orMissing(() => network.inspect())
+      if (!info) return
+      // Traefik and the worker stay attached to an app network; the daemon refuses to remove one in use.
+      for (const id of Object.keys(info.Containers ?? {})) {
+        try {
+          await network.disconnect({ Container: id, Force: true })
+        } catch (err) {
+          // Removed, or disconnected by someone else, in the meantime.
+          if (statusCode(err) !== 404 && !NOT_CONNECTED.test(messageOf(err))) throw err
+        }
+      }
+      await orMissing(() => network.remove())
+    },
+
+    async listManagedImages() {
+      const images = await docker.listImages()
+      // An untagged image is listed as `<none>:<none>` (or without RepoTags in newer daemons).
+      return images.flatMap((i) => i.RepoTags ?? []).filter((tag) => tag.startsWith(MANAGED_IMAGE_PREFIX))
     },
 
     onContainerDie(cb, onError) {

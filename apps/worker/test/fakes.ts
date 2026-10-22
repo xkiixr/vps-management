@@ -31,8 +31,9 @@ const MISSING: ContainerState = {
 }
 
 /**
- * An in-memory Docker. `run`, `attachAlias`, `stopAndRemove` and `restart` are recorded in `events` as
- * `run <name>`, `alias <name> <aliases joined by ,>`, `stop <name>` and `restart <name>`.
+ * An in-memory Docker. `run`, `attachAlias`, `stopAndRemove`, `restart` and `removeNetwork` are recorded in
+ * `events` as `run <name>`, `alias <name> <aliases joined by ,>`, `stop <name>`, `restart <name>` and
+ * `remove-network <name>`.
  */
 export class FakeDocker implements DockerRuntime {
   readonly existingImages = new Set<string>()
@@ -176,6 +177,21 @@ export class FakeDocker implements DockerRuntime {
 
   async removeImage(tag: string): Promise<void> {
     this.existingImages.delete(tag)
+  }
+
+  async listManagedNetworks(): Promise<string[]> {
+    return [...this.networks].filter((name) => name.startsWith('vpsm-env-'))
+  }
+
+  async removeNetwork(name: string): Promise<void> {
+    if (!this.networks.has(name)) return
+    this.events.push(`remove-network ${name}`)
+    this.networks.delete(name)
+    for (const networks of this.endpoints.values()) networks.delete(name)
+  }
+
+  async listManagedImages(): Promise<string[]> {
+    return [...this.existingImages].filter((tag) => tag.startsWith('vpsm/'))
   }
 
   onContainerDie(cb: (name: string) => void, onError?: (err: Error) => void): () => void {

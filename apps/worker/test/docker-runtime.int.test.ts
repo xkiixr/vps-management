@@ -6,9 +6,11 @@ import { buildContainerSpec } from '../src/runtime/container-spec'
 import { createDockerRuntime } from '../src/runtime/docker-runtime'
 
 // Needs a Docker daemon (dockerode honours DOCKER_HOST) and pulls alpine:3; run with INTEGRATION=1.
-// Everything this file creates is named `vpsm-int-<run id>...` and is removed in afterAll.
+// Everything this file creates has `vpsm-int-<run id>` in its name (or is tagged `vpsm/int-<run id>`) and is
+// removed in afterAll. None of it looks like an app's network or image to a worker's orphan sweep (no id).
 const IMAGE = 'alpine:3'
-const run = `vpsm-int-${randomBytes(3).toString('hex')}`
+const runId = randomBytes(3).toString('hex')
+const run = `vpsm-int-${runId}`
 const names = {
   main: `${run}-main`,
   unmanaged: `${run}-unmanaged`,
@@ -20,9 +22,17 @@ const names = {
   net2: `${run}-net2`,
   net3: `${run}-net3`,
   net4: `${run}-net4`,
+  attached: `${run}-attached`,
+  joined: `${run}-joined`,
+  imageBase: `${run}-image-base`,
+  // Listed by listManagedNetworks, which only looks at the prefix.
+  appNet: `vpsm-env-${run}`,
 }
 const committedImage = { repo: `vpsm-int/${run}`, tag: '1' }
 const committedRef = `${committedImage.repo}:${committedImage.tag}`
+const managedImage = { repo: `vpsm/int-${runId}`, tag: '1' }
+const managedRef = `${managedImage.repo}:${managedImage.tag}`
+const otherRef = `vpsm-int/${run}-other:1`
 // Exits promptly on SIGTERM (plain `sleep` as PID 1 would ignore it).
 const LONG_RUNNING = ['sh', '-c', 'trap "exit 0" TERM; sleep 60 & wait']
 const NEVER_RESTART: DeployConfig = { ...DEFAULT_DEPLOY_CONFIG, restartPolicy: 'never' }
@@ -92,7 +102,7 @@ afterAll(async () => {
   for (const c of containers) await runtime.stopAndRemove(c.Id, 1)
   const networks = await docker.listNetworks({ filters: { name: [run] } })
   for (const n of networks) await docker.getNetwork(n.Id).remove()
-  await runtime.removeImage(committedRef)
+  for (const ref of [committedRef, managedRef, otherRef]) await runtime.removeImage(ref)
 }, 60_000)
 
 test('run, state, listManaged, restart, stopAndRemove round trip', async () => {
@@ -239,4 +249,54 @@ test('imageExists and removeImage', async () => {
   await runtime.stopAndRemove(names.fromCommit, 1)
   await runtime.removeImage(committedRef)
   expect(await runtime.imageExists(committedRef)).toBe(false)
+}, 60_000)
+
+test('listManagedNetworks and removeNetwork, which first disconnects every container', async () => {
+  await runtime.ensureNetwork(names.appNet)
+  await runtime.ensureNetwork(names.net1)
+  await runtime.run(specFor(names.attached, names.appNet, LONG_RUNNING))
+  await runtime.run(specFor(names.joined, names.net1, LONG_RUNNING))
+  await runtime.connect(names.joined, names.appNet)
+
+  const listed = await runtime.listManagedNetworks()
+  expect(listed).toContain(names.appNet)
+  expect(listed).not.toContain(names.net1)
+  expect(listed.every((name) => name.startsWith('vpsm-env-'))).toBe(true)
+
+  await runtime.removeNetwork(names.appNet)
+
+  expect(await runtime.listManagedNetworks()).not.toContain(names.appNet)
+  await expect(docker.getNetwork(names.appNet).inspect()).rejects.toMatchObject({ statusCode: 404 })
+  // The containers keep running, without that network.
+  const attached = await docker.getContainer(names.attached).inspect()
+  expect(attached.State.Running).toBe(true)
+  expect(Object.keys(attached.NetworkSettings.Networks)).not.toContain(names.appNet)
+  const joined = await docker.getContainer(names.joined).inspect()
+  expect(joined.State.Running).toBe(true)
+  expect(Object.keys(joined.NetworkSettings.Networks)).toEqual([names.net1])
+
+  // Already gone: still no error.
+  await expect(runtime.removeNetwork(names.appNet)).resolves.toBeUndefined()
+
+  await runtime.stopAndRemove(names.attached, 5)
+  await runtime.stopAndRemove(names.joined, 5)
+}, 60_000)
+
+test('listManagedImages lists vpsm/ tags only', async () => {
+  const base = await docker.createContainer({ name: names.imageBase, Image: IMAGE, Cmd: ['true'] })
+  await base.commit({ repo: managedImage.repo, tag: managedImage.tag })
+  await runtime.stopAndRemove(names.imageBase, 1)
+  // A second tag of the same image, in another repository.
+  await docker.getImage(managedRef).tag({ repo: `vpsm-int/${run}-other`, tag: '1' })
+
+  const listed = await runtime.listManagedImages()
+  expect(listed).toContain(managedRef)
+  expect(listed).not.toContain(otherRef)
+  expect(listed).not.toContain(IMAGE)
+  expect(listed.every((tag) => tag.startsWith('vpsm/'))).toBe(true)
+
+  await runtime.removeImage(managedRef)
+  expect(await runtime.listManagedImages()).not.toContain(managedRef)
+  // Only that tag went: the image is still there under its other one.
+  expect(await runtime.imageExists(otherRef)).toBe(true)
 }, 60_000)

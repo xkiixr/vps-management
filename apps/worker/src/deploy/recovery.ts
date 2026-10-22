@@ -2,13 +2,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { and, eq, inArray, isNotNull, or } from 'drizzle-orm'
 import { deployments, setDeploymentStatus } from '@vpsm/db'
+import { removeOrphanedContainers } from '../maintenance/sweep'
 import { ensureNetworkAttachments } from '../monitor/network-attachments'
 import { reconcileLiveDeployments } from '../monitor/reconcile'
 import type { PipelineDeps } from './pipeline'
 
 const INTERRUPTED_REASON = 'worker restarted during deployment'
-
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 /**
  * Run once at startup, before the deploy loop: no deployment can be running yet, so anything the last
@@ -27,7 +26,7 @@ const messageOf = (error: unknown) => (error instanceof Error ? error.message : 
 export async function recoverInterruptedDeployments(
   deps: PipelineDeps,
 ): Promise<{ failed: number; removedContainers: number }> {
-  const { db, docker } = deps
+  const { db } = deps
 
   const interrupted = await db
     .select({ id: deployments.id })
@@ -48,23 +47,9 @@ export async function recoverInterruptedDeployments(
   await ensureNetworkAttachments(deps)
   await deps.regenerateRoutes()
 
-  const current = await db
-    .select({ id: deployments.id })
-    .from(deployments)
-    .where(inArray(deployments.status, ['SUCCESS', 'CRASHED']))
-  const keep = new Set(current.map((d) => d.id))
-  const orphans = (await docker.listManaged()).filter((c) => !keep.has(c.deploymentId))
-  let removedContainers = 0
-  for (const { name } of orphans) {
-    // One container Docker will not remove (e.g. 409: removal already in progress) must not stop the
-    // worker from starting; it is tried again on the next start.
-    try {
-      await docker.stopAndRemove(name, 0)
-      removedContainers++
-    } catch (error) {
-      console.error(`recovery: could not remove orphaned container ${name}: ${messageOf(error)}`)
-    }
-  }
+  // One container Docker will not remove (e.g. 409: removal already in progress) must not stop the worker
+  // from starting; it is tried again by the orphan sweep.
+  const removedContainers = await removeOrphanedContainers(deps, { timeoutSec: 0, context: 'recovery' })
 
   return { failed: interrupted.length, removedContainers }
 }

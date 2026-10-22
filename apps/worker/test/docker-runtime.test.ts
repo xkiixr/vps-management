@@ -276,3 +276,92 @@ describe('attachAlias', () => {
     await expect(runtime.attachAlias('vpsm-web-1', 'net1', ['web.internal'])).rejects.toThrow('daemon error')
   })
 })
+
+describe('listManagedNetworks', () => {
+  test('lists the app networks only', async () => {
+    const names = ['bridge', 'vpsm-env-0b6f0c2e-1d1a-4c3e-9a51-6c0f5f3a9b10', 'my-vpsm-env-x', 'vpsm-envx', 'vpsm-env-other', 'vpsm-int-net']
+    const listNetworks = vi.fn(async () => names.map((Name) => ({ Name })))
+    expect(await createDockerRuntime(fake({ listNetworks })).listManagedNetworks()).toEqual([
+      'vpsm-env-0b6f0c2e-1d1a-4c3e-9a51-6c0f5f3a9b10',
+      'vpsm-env-other',
+    ])
+  })
+})
+
+describe('removeNetwork', () => {
+  function network(parts: {
+    containers?: string[]
+    inspectError?: Error
+    disconnectErrors?: Record<string, Error>
+    removeError?: Error
+  }) {
+    const calls: string[] = []
+    const getNetwork = vi.fn(() => ({
+      inspect: async () => {
+        if (parts.inspectError) throw parts.inspectError
+        return { Containers: Object.fromEntries((parts.containers ?? []).map((id) => [id, { Name: `name-of-${id}` }])) }
+      },
+      disconnect: async (o: { Container: string }) => {
+        calls.push(`disconnect ${JSON.stringify(o)}`)
+        const error = parts.disconnectErrors?.[o.Container]
+        if (error) throw error
+      },
+      remove: async () => {
+        calls.push('remove')
+        if (parts.removeError) throw parts.removeError
+      },
+    }))
+    return { calls, getNetwork, runtime: createDockerRuntime(fake({ getNetwork })) }
+  }
+
+  test('force-disconnects every container on it, then removes it', async () => {
+    const { calls, getNetwork, runtime } = network({ containers: ['c1', 'c2'] })
+    await runtime.removeNetwork('vpsm-env-1')
+    expect(getNetwork).toHaveBeenCalledWith('vpsm-env-1')
+    expect(calls).toEqual([
+      'disconnect {"Container":"c1","Force":true}',
+      'disconnect {"Container":"c2","Force":true}',
+      'remove',
+    ])
+  })
+
+  test('is a no-op for a missing network, and tolerates containers and networks that vanish meanwhile', async () => {
+    const missing = network({ inspectError: dockerError(404, 'network vpsm-env-1 not found') })
+    await expect(missing.runtime.removeNetwork('vpsm-env-1')).resolves.toBeUndefined()
+    expect(missing.calls).toEqual([])
+
+    const vanishing = network({
+      containers: ['gone', 'left', 'stays'],
+      disconnectErrors: {
+        gone: dockerError(404, 'No such container: gone'),
+        left: dockerError(500, '(HTTP code 500) server error - container left is not connected to network vpsm-env-1'),
+      },
+      removeError: dockerError(404, 'network vpsm-env-1 not found'),
+    })
+    await expect(vanishing.runtime.removeNetwork('vpsm-env-1')).resolves.toBeUndefined()
+    expect(vanishing.calls).toHaveLength(4)
+  })
+
+  test('rethrows other failures; a failed disconnect leaves the network in place', async () => {
+    const stuck = network({ containers: ['c1'], disconnectErrors: { c1: dockerError(500, 'daemon error') } })
+    await expect(stuck.runtime.removeNetwork('vpsm-env-1')).rejects.toThrow('daemon error')
+    expect(stuck.calls).toEqual(['disconnect {"Container":"c1","Force":true}'])
+
+    const busy = network({ removeError: dockerError(403, 'network vpsm-env-1 has active endpoints') })
+    await expect(busy.runtime.removeNetwork('vpsm-env-1')).rejects.toThrow('has active endpoints')
+  })
+})
+
+describe('listManagedImages', () => {
+  test('lists the vpsm/ tags of every image, ignoring untagged images and other repositories', async () => {
+    const listImages = vi.fn(async () => [
+      { RepoTags: ['vpsm/a:1', 'alpine:3'] },
+      { RepoTags: ['<none>:<none>'] },
+      { RepoTags: null },
+      {},
+      { RepoTags: ['vpsm/b:2', 'vpsm/b:3'] },
+      { RepoTags: ['myvpsm/x:1', 'vpsm-int/y:1', 'docker.io/vpsm/z:1'] },
+    ])
+    expect(await createDockerRuntime(fake({ listImages })).listManagedImages()).toEqual(['vpsm/a:1', 'vpsm/b:2', 'vpsm/b:3'])
+  })
+})
