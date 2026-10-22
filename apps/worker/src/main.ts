@@ -11,6 +11,7 @@ import { runCommand } from './exec'
 import { cleanupImages } from './images/retention'
 import { startCrashMonitor } from './monitor/crash-monitor'
 import { ensureNetworkAttachments } from './monitor/network-attachments'
+import { clearReady, markReady } from './ready'
 import { regenerateRoutes } from './routing/active-routes'
 import { routesTlsFor } from './routing/traefik-config'
 import { createDockerRuntime } from './runtime/docker-runtime'
@@ -29,6 +30,8 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) throw new Error('DATABASE_URL is required')
 
+  // The healthcheck (and so the web dashboard, which waits for it) must not see a file from an earlier run.
+  await clearReady()
   await migrate(databaseUrl)
   const config = loadConfig()
   const { db, sql, close } = createDb(databaseUrl)
@@ -60,6 +63,9 @@ async function main(): Promise<void> {
     `recovery: ${recovered.failed} interrupted deployment(s) marked FAILED, ${recovered.removedContainers} orphaned container(s) removed`,
   )
 
+  // Migrated and recovered: the dashboard may start serving.
+  await markReady()
+
   const controller = new AbortController()
   startCrashMonitor(deps, controller.signal)
   // A recreated Traefik container loses its networks; this puts it back on them without a deployment.
@@ -87,6 +93,7 @@ async function main(): Promise<void> {
   console.log(`${received}: shutting down`)
   controller.abort()
   clearInterval(attachments)
+  await clearReady().catch(() => undefined)
   const finished = await Promise.race([loop.then(() => true), sleep(SHUTDOWN_GRACE_MS, false, { ref: false })])
   if (!finished) console.error('the running deployment did not finish in time; it is marked FAILED on the next start')
   await close()

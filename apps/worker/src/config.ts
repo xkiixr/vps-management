@@ -80,6 +80,19 @@ const schema = fields.superRefine((e, ctx) => {
   if (e.TLS_MODE === 'dns-wildcard' && typeof e.APPS_DOMAIN === 'string' && !e.APPS_DOMAIN.endsWith(DUCKDNS_SUFFIX)) {
     ctx.addIssue({ code: 'custom', path: ['APPS_DOMAIN'], message: `must end with ${DUCKDNS_SUFFIX} when TLS_MODE is dns-wildcard` })
   }
+  // The one certificate is for *.APPS_DOMAIN, and a wildcard covers a single label: panel.APPS_DOMAIN is served
+  // with it, a.panel.APPS_DOMAIN or APPS_DOMAIN itself would get a certificate for another name.
+  if (e.TLS_MODE === 'dns-wildcard' && typeof e.APPS_DOMAIN === 'string' && e.PANEL_DOMAIN !== undefined) {
+    const suffix = `.${e.APPS_DOMAIN}`
+    const label = e.PANEL_DOMAIN.slice(0, -suffix.length)
+    if (!e.PANEL_DOMAIN.endsWith(suffix) || label === '' || label.includes('.')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['PANEL_DOMAIN'],
+        message: 'must be a single label under APPS_DOMAIN (such as panel.<APPS_DOMAIN>) when TLS_MODE is dns-wildcard',
+      })
+    }
+  }
 })
 
 /** Reads the worker's settings from the environment. Throws one message naming every bad variable (never their values). */

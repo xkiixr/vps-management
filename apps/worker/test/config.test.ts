@@ -223,6 +223,45 @@ describe('the panel settings', () => {
   })
 })
 
+// The wildcard certificate (*.APPS_DOMAIN) covers exactly one label, so a panel anywhere else would be served
+// with a certificate for another name.
+describe('PANEL_DOMAIN with the wildcard certificate (TLS_MODE=dns-wildcard)', () => {
+  const wildcard = { APPS_DOMAIN: 'paas.duckdns.org', TLS_MODE: 'dns-wildcard', PUBLIC_HTTPS_PORT: '8443' }
+
+  test('a single label under APPS_DOMAIN is accepted', () => {
+    expect(loadConfig({ ...wildcard, PANEL_DOMAIN: 'panel.paas.duckdns.org' }).panelDomain).toBe('panel.paas.duckdns.org')
+  })
+
+  test('PANEL_DOMAIN stays optional', () => {
+    expect(loadConfig(wildcard).panelDomain).toBeUndefined()
+    expect(loadConfig({ ...wildcard, PANEL_DOMAIN: '' }).panelDomain).toBeUndefined()
+  })
+
+  test.each([
+    ['two labels under APPS_DOMAIN', 'a.panel.paas.duckdns.org'],
+    ['APPS_DOMAIN itself', 'paas.duckdns.org'],
+    ['another domain', 'panel.example.com'],
+    ['a name that only ends like APPS_DOMAIN', 'panelpaas.duckdns.org'],
+    ['a sibling DuckDNS name', 'panel.other.duckdns.org'],
+  ])('%s is a configuration error that names both variables and echoes no value', (_what, panelDomain) => {
+    let message = ''
+    try {
+      loadConfig({ ...wildcard, PANEL_DOMAIN: panelDomain })
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toMatch(/^invalid worker configuration: PANEL_DOMAIN must be a single label under APPS_DOMAIN/)
+    expect(message).not.toContain(panelDomain)
+    expect(message).not.toContain('paas')
+  })
+
+  test('without the wildcard certificate the panel may live anywhere', () => {
+    const load = (domain: string) => loadConfig({ APPS_DOMAIN: 'apps.example.com', PANEL_DOMAIN: domain }).panelDomain
+    expect(load('panel.example.org')).toBe('panel.example.org')
+    expect(load('a.b.apps.example.com')).toBe('a.b.apps.example.com')
+  })
+})
+
 test('the error never contains the token', () => {
   let message = ''
   try {
