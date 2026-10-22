@@ -16,6 +16,7 @@ import {
   loadDeploymentContext,
   markDeploymentLive,
   setDeploymentStatus,
+  ValidationError,
 } from '../src/index'
 import { setupTestDb } from '../src/testing'
 import { listenDuring } from './helpers'
@@ -105,6 +106,61 @@ test('enqueue never skips a deployment that is already claimed', async () => {
   await claimNextDeployment(db)
   await enqueueDeployment(db, { serviceInstanceId, trigger: 'push' })
   expect((await get(a.id)).status).toBe('QUEUED')
+})
+
+test.each(['push', 'manual', 'config', 'rollback'] as const)(
+  'a restart is refused, not queued, while a %s deployment of the service is waiting',
+  async (trigger) => {
+    const waiting = await enqueueDeployment(db, { serviceInstanceId, trigger })
+
+    await expect(enqueueDeployment(db, { serviceInstanceId, trigger: 'restart' })).rejects.toThrow(
+      new ValidationError('a deployment is already queued for this service'),
+    )
+
+    expect((await get(waiting.id)).status).toBe('QUEUED')
+    expect(await db.select().from(deployments).where(eq(deployments.serviceInstanceId, serviceInstanceId))).toHaveLength(1)
+  },
+)
+
+test('a restart is queued when nothing waits, and when the queued deployment is already claimed', async () => {
+  const first = await enqueueDeployment(db, { serviceInstanceId, trigger: 'restart' })
+  expect(first.status).toBe('QUEUED')
+  await claimNextDeployment(db)
+
+  // Claimed: it is being worked on, not waiting, so it neither blocks nor is skipped.
+  const second = await enqueueDeployment(db, { serviceInstanceId, trigger: 'restart' })
+
+  expect(second.status).toBe('QUEUED')
+  expect((await get(first.id)).status).toBe('QUEUED')
+})
+
+test('a waiting deployment of another service does not refuse a restart', async () => {
+  const other = await enqueueDeployment(db, { serviceInstanceId: si2, trigger: 'push' })
+
+  const restart = await enqueueDeployment(db, { serviceInstanceId: si1, trigger: 'restart' })
+
+  expect(restart.status).toBe('QUEUED')
+  expect((await get(other.id)).status).toBe('QUEUED')
+})
+
+test('a restart that is waiting is still skipped by a later deployment of another kind', async () => {
+  const restart = await enqueueDeployment(db, { serviceInstanceId, trigger: 'restart' })
+  const push = await enqueueDeployment(db, { serviceInstanceId, trigger: 'push' })
+  expect((await get(restart.id)).status).toBe('SKIPPED')
+  expect((await get(push.id)).status).toBe('QUEUED')
+})
+
+test('a restart racing a push leaves exactly one QUEUED deployment', async () => {
+  const results = await Promise.allSettled([
+    enqueueDeployment(db, { serviceInstanceId, trigger: 'push' }),
+    enqueueDeployment(db, { serviceInstanceId, trigger: 'restart' }),
+  ])
+  const rows = await db.select().from(deployments).where(eq(deployments.serviceInstanceId, serviceInstanceId))
+  expect(rows.filter((d) => d.status === 'QUEUED')).toHaveLength(1)
+  // Whichever came second either cancelled a restart or was refused; a push is never cancelled by a restart.
+  const push = rows.find((d) => d.trigger === 'push')
+  expect(push?.status).toBe('QUEUED')
+  expect(results.filter((r) => r.status === 'rejected').length + rows.filter((d) => d.status === 'SKIPPED').length).toBe(1)
 })
 
 test('concurrent enqueues of one service leave exactly one QUEUED deployment', async () => {

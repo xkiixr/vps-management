@@ -859,6 +859,31 @@ describe('rollback', () => {
     await runDeployment(rb.id, deps)
     expect(await get(rb.id)).toMatchObject({ status: 'FAILED', failureReason: 'rollback target not found' })
   })
+
+  test("a rollback to another service's deployment is refused before anything runs", async () => {
+    const { instance: api } = await createAppService(db, {
+      projectName: 'shop',
+      serviceName: 'api',
+      source: { repo: 'acme/api', branch: 'main' },
+      appsDomain: 'apps.example.com',
+    })
+    const foreign = await enqueueDeployment(db, { serviceInstanceId: api.id, trigger: 'manual' })
+    await setDeploymentStatus(db, foreign.id, 'BUILDING')
+    await setDeploymentStatus(db, foreign.id, 'DEPLOYING', {
+      imageTag: 'vpsm/api:image',
+      configSnapshot: { source: api.source, build: api.build, deploy: api.deploy, builder: 'railpack' },
+    })
+    await markDeploymentLive(db, { deploymentId: foreign.id, containerName: 'vpsm-api-live0000' })
+    deps.docker.existingImages.add('vpsm/api:image')
+    const rb = await queue('rollback', { rollbackOfId: foreign.id })
+
+    await runDeployment(rb.id, deps)
+
+    expect(await get(rb.id)).toMatchObject({ status: 'FAILED', failureReason: 'rollback target belongs to another service' })
+    expect(deps.events).toEqual([])
+    expect(await statusHistory(rb.id)).toEqual(['QUEUED', 'FAILED'])
+    expect((await get(foreign.id)).status).toBe('SUCCESS')
+  })
 })
 
 describe('restart', () => {
@@ -951,19 +976,90 @@ describe('restart', () => {
 
     await runDeployment(rs.id, deps)
 
-    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'image for rollback target no longer exists' })
+    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'image of the running deployment no longer exists' })
     expect(deps.events).toEqual([])
     expect((await get(live.id)).status).toBe('SUCCESS')
     expect(deps.docker.has('vpsm-web-live0000')).toBe(true)
   })
 
-  test('a restart without a target fails clearly instead of building', async () => {
+  test('a restart with nothing running fails clearly instead of building', async () => {
     const rs = await queue('restart')
 
     await runDeployment(rs.id, deps)
 
-    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'rollback target not found' })
+    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'nothing is running to restart' })
     expect(deps.events).toEqual([])
+    expect(await statusHistory(rs.id)).toEqual(['QUEUED', 'FAILED'])
+  })
+
+  test('a restart whose named deployment is no longer live has nothing to restart', async () => {
+    const { live, rs } = await restartScenario()
+    await setDeploymentStatus(db, live.id, 'REMOVED')
+
+    await runDeployment(rs.id, deps)
+
+    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'nothing is running to restart' })
+    expect(deps.events).toEqual([])
+  })
+
+  test('a restart of a live deployment without an image fails clearly', async () => {
+    const { live, rs } = await restartScenario()
+    await db.update(deployments).set({ imageTag: null }).where(eq(deployments.id, live.id))
+
+    await runDeployment(rs.id, deps)
+
+    expect(await get(rs.id)).toMatchObject({ status: 'FAILED', failureReason: 'the running deployment has no built image' })
+    expect(deps.events).toEqual([])
+  })
+
+  test('a restart also runs when the live deployment has crashed', async () => {
+    const { live, rs } = await restartScenario()
+    await setDeploymentStatus(db, live.id, 'CRASHED')
+
+    await runDeployment(rs.id, deps)
+
+    expect(await get(rs.id)).toMatchObject({ status: 'SUCCESS', imageTag: 'vpsm/si:live' })
+    expect((await get(live.id)).status).toBe('REMOVED')
+  })
+
+  test('a restart restarts what is live when it runs, not what was live when it was queued', async () => {
+    const a = await liveDeployment('vpsm-web-aaaa0000', { imageTag: 'vpsm/si:a', commitSha: 'aaa', deploy: liveDeploy, builder: 'dockerfile' })
+    // B is being deployed while the user clicks Restart: the restart is queued behind it and names A.
+    const b = await queue()
+    await setDeploymentStatus(db, b.id, 'BUILDING')
+    const rs = await queue('restart', { rollbackOfId: a.id })
+    const bDeploy = { ...(a.configSnapshot as { deploy: DeployConfig }).deploy, port: 4000, memoryLimitMB: 128, startCommand: 'node b.js' }
+    await setDeploymentStatus(db, b.id, 'DEPLOYING', {
+      commitSha: 'bbb',
+      commitMessage: 'newer commit',
+      imageTag: 'vpsm/si:b',
+      configSnapshot: { ...(a.configSnapshot as object), deploy: bDeploy },
+    })
+    await markDeploymentLive(db, { deploymentId: b.id, containerName: 'vpsm-web-bbbb0000', previousId: a.id })
+    deps.docker.seedRunning([{ name: 'vpsm-web-bbbb0000', memoryMb: 128, deploymentId: b.id, serviceInstanceId: instanceId }])
+    deps.docker.existingImages.add('vpsm/si:a')
+    deps.docker.existingImages.add('vpsm/si:b')
+
+    await runDeployment(rs.id, deps)
+
+    // It ran B's image with B's config and retired B's container; A did not come back.
+    const spec = deps.docker.lastSpec()
+    expect(spec.Image).toBe('vpsm/si:b')
+    expect(spec.Env).toContain('PORT=4000')
+    expect(spec.Cmd).toEqual(['sh', '-c', 'node b.js'])
+    expect(deps.events).toContain('stop vpsm-web-bbbb0000')
+    expect(deps.events).not.toContain('stop vpsm-web-aaaa0000')
+    expect(await get(rs.id)).toMatchObject({
+      status: 'SUCCESS',
+      imageTag: 'vpsm/si:b',
+      commitSha: 'bbb',
+      commitMessage: 'newer commit',
+      configSnapshot: (await get(b.id)).configSnapshot,
+      rollbackOfId: a.id,
+    })
+    expect((await get(b.id)).status).toBe('REMOVED')
+    expect((await get(a.id)).status).toBe('REMOVED')
+    expect(await logLines(rs.id)).toContain(`==> Restarting deployment ${b.id.slice(0, 8)} (image vpsm/si:b)`)
   })
 })
 

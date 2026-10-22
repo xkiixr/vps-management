@@ -13,13 +13,13 @@ import {
   deployments,
   enqueueDeployment,
   findServiceInstance,
+  findUserByEmail,
   generatePassword,
   listUsers,
   projects,
   recordAudit,
   services,
   setPassword,
-  users,
 } from '@vpsm/db'
 import { loadConfig, type WorkerConfig } from './config'
 import { effectiveResourceLimits } from './resource-limits'
@@ -188,7 +188,13 @@ const COMMANDS: Record<string, Command> = {
       if (!live?.containerName) throw new CliError(`${project}/${service} has no running deployment`)
       await c.docker.restart(live.containerName)
       c.out(`restarted ${project}/${service}`)
-      await audit(c, { action: 'deployment.restart', targetType: 'deployment', targetId: live.id, metadata: { project, service } })
+      // A plain `docker restart` (the web dashboard's Restart is a deployment instead), hence a different action.
+      await audit(c, {
+        action: 'container.restart',
+        targetType: 'container',
+        targetId: live.containerName,
+        metadata: { project, service, deploymentId: live.id },
+      })
     },
   },
 
@@ -238,9 +244,8 @@ const COMMANDS: Record<string, Command> = {
   'user:reset-password': {
     args: ['email'],
     async run(c) {
-      const email = c.args[0]!.trim().toLowerCase()
-      const [user] = await c.db.select({ id: users.id, email: users.email }).from(users).where(eq(users.email, email))
-      if (!user) throw new CliError(`user ${email} not found`)
+      const user = await findUserByEmail(c.db, c.args[0]!)
+      if (!user) throw new CliError(`user ${c.args[0]} not found`)
       const password = generatePassword()
       await setPassword(c.db, user.id, password)
       c.out(`reset password for ${user.email}`)

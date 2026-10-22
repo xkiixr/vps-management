@@ -276,6 +276,43 @@ describe('the panel route', () => {
     expect(await routesYaml(undefined, undefined, false)).not.toContain('panel')
   })
 
+  test.each([
+    ['upstream', { domain: 'panel.apps.example.com', upstream: 'http://vpsm_web:3000' }, 'invalid route: upstream url "http://vpsm_web:3000"'],
+    ['hostname', { domain: 'Panel.Apps.Example.com', upstream: 'http://vpsm-web:3000' }, 'invalid hostname: Panel.Apps.Example.com'],
+  ])('a panel with an invalid %s is reported and left out, the app routes are still written', async (_what, bad, reason) => {
+    const si1 = await addService('web')
+    await deployLive(si1, 'vpsm-web-aaaaaaaa', 3000)
+    const { calls, onInvalid } = collectInvalid()
+    const dir = await mkdtemp(join(tmpdir(), 'vpsm-regen-'))
+    try {
+      await regenerateRoutes(db, dir, onInvalid, undefined, bad)
+
+      const yaml = await readFile(join(dir, 'routes.yml'), 'utf8')
+      expect(calls).toEqual([['panel', reason]])
+      expect(yaml).toContain(`    r-${si1}:\n`)
+      expect(yaml).not.toContain('r-panel')
+      expect(yaml).not.toContain('s-panel')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an invalid panel is warned about by default', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const dir = await mkdtemp(join(tmpdir(), 'vpsm-regen-'))
+    try {
+      await regenerateRoutes(db, dir, undefined, undefined, { domain: 'panel.apps.example.com', upstream: 'https://vpsm-web:3000' })
+
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        'skipping route for service instance panel: invalid route: upstream url "https://vpsm-web:3000"',
+      )
+      expect(await readFile(join(dir, 'routes.yml'), 'utf8')).toBe('# no routes\n')
+    } finally {
+      warn.mockRestore()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('an app that has the panel hostname is skipped and reported, siblings and the panel are kept', async () => {
     const good = await addService('web')
     const taken = await addService('api')

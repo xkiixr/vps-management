@@ -85,8 +85,8 @@ type Job = {
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 /**
- * A rollback runs the image of an earlier deployment again; a restart is the same thing with the live
- * deployment as that earlier one. Neither fetches or builds anything.
+ * A rollback runs the image of an earlier deployment again (the one it was queued with, `rollbackOfId`); a
+ * restart does the same with whatever is live when it runs. Neither fetches or builds anything.
  */
 const reusesImage = (trigger: DeploymentTrigger) => trigger === 'rollback' || trigger === 'restart'
 
@@ -138,9 +138,9 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
 }
 
 async function execute(job: Job): Promise<void> {
-  const target = reusesImage(job.ctx.deployment.trigger) ? rollbackTarget(job.ctx) : undefined
+  const target = reusesImage(job.ctx.deployment.trigger) ? reuseTarget(job.ctx) : undefined
   await checkResources(job, target?.snapshot.deploy ?? job.ctx.instance.deploy)
-  const image = target ? await startRollback(job, target) : await buildPhase(job)
+  const image = target ? await startReuse(job, target) : await buildPhase(job)
   const name = await runPhase(job, image)
   await switchPhase(job, name)
 }
@@ -169,22 +169,47 @@ async function checkResources(job: Job, deploy: DeployConfig): Promise<void> {
   if (!budget.ok) throw new DeploymentFailure(budget.reason)
 }
 
-type RollbackTarget = { source: Deployment; tag: string; snapshot: ConfigSnapshot }
+/** What a user is told when the deployment to run again cannot be used; a restart never talks about rollbacks. */
+type ReuseFailures = Record<'missing' | 'otherService' | 'noImage' | 'imageGone', string>
 
-function rollbackTarget(ctx: DeploymentContext): RollbackTarget {
-  const source = ctx.rollbackSource
-  if (!source) throw new DeploymentFailure('rollback target not found')
-  const snapshot = source.configSnapshot as Partial<ConfigSnapshot> | null
-  if (!source.imageTag || typeof snapshot?.deploy !== 'object' || snapshot.deploy === null) {
-    throw new DeploymentFailure('rollback target has no built image')
-  }
-  return { source, tag: source.imageTag, snapshot: snapshot as ConfigSnapshot }
+const REUSE_FAILURES: Record<'rollback' | 'restart', ReuseFailures> = {
+  rollback: {
+    missing: 'rollback target not found',
+    otherService: 'rollback target belongs to another service',
+    noImage: 'rollback target has no built image',
+    imageGone: 'image for rollback target no longer exists',
+  },
+  restart: {
+    missing: 'nothing is running to restart',
+    otherService: 'the running deployment belongs to another service',
+    noImage: 'the running deployment has no built image',
+    imageGone: 'image of the running deployment no longer exists',
+  },
 }
 
-async function startRollback(job: Job, target: RollbackTarget): Promise<Image> {
-  if (!(await job.deps.docker.imageExists(target.tag))) {
-    throw new DeploymentFailure('image for rollback target no longer exists')
+type ReuseTarget = { source: Deployment; tag: string; snapshot: ConfigSnapshot; failures: ReuseFailures }
+
+/**
+ * The deployment whose image and config run again. A rollback names it when it is queued. A restart does not:
+ * it takes the deployment that is live now, because by the time it runs a newer one may have gone live and
+ * restarting the one that was live at click time would silently undo it.
+ */
+function reuseTarget(ctx: DeploymentContext): ReuseTarget {
+  const restart = ctx.deployment.trigger === 'restart'
+  const failures = REUSE_FAILURES[restart ? 'restart' : 'rollback']
+  const source = restart ? ctx.previous : ctx.rollbackSource
+  if (!source) throw new DeploymentFailure(failures.missing)
+  // `rollbackOfId` comes from whoever enqueued the rollback; never run another service's image.
+  if (source.serviceInstanceId !== ctx.instance.id) throw new DeploymentFailure(failures.otherService)
+  const snapshot = source.configSnapshot as Partial<ConfigSnapshot> | null
+  if (!source.imageTag || typeof snapshot?.deploy !== 'object' || snapshot.deploy === null) {
+    throw new DeploymentFailure(failures.noImage)
   }
+  return { source, tag: source.imageTag, snapshot: snapshot as ConfigSnapshot, failures }
+}
+
+async function startReuse(job: Job, target: ReuseTarget): Promise<Image> {
+  if (!(await job.deps.docker.imageExists(target.tag))) throw new DeploymentFailure(target.failures.imageGone)
   const verb = job.ctx.deployment.trigger === 'restart' ? 'Restarting' : 'Rolling back to'
   job.log('deploy', `==> ${verb} deployment ${target.source.id.slice(0, 8)} (image ${target.tag})`)
   await transition(job, 'DEPLOYING', {

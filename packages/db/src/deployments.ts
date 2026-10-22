@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
 import { canTransition, type DeploymentStatus, type DeploymentTrigger } from '@vpsm/core'
 import type { Db } from './client'
+import { ValidationError } from './errors'
 import {
   type Deployment,
   deploymentLogs,
@@ -79,16 +80,19 @@ export async function enqueueDeployment(
       .for('no key update')
     if (!instance) throw new Error(`service instance ${i.serviceInstanceId} not found`)
 
-    await tx
-      .update(deployments)
-      .set({ status: 'SKIPPED', finishedAt: sql`now()` })
-      .where(
-        and(
-          eq(deployments.serviceInstanceId, i.serviceInstanceId),
-          eq(deployments.status, 'QUEUED'),
-          isNull(deployments.claimedAt),
-        ),
-      )
+    const waiting = and(
+      eq(deployments.serviceInstanceId, i.serviceInstanceId),
+      eq(deployments.status, 'QUEUED'),
+      isNull(deployments.claimedAt),
+    )
+    if (i.trigger === 'restart') {
+      // A newer deployment replaces the ones waiting behind it, but a restart must never cancel one (a push
+      // that was queued is the user's newer code). It is refused instead, and can be asked for again.
+      const [queued] = await tx.select({ id: deployments.id }).from(deployments).where(waiting).limit(1)
+      if (queued) throw new ValidationError('a deployment is already queued for this service')
+    } else {
+      await tx.update(deployments).set({ status: 'SKIPPED', finishedAt: sql`now()` }).where(waiting)
+    }
 
     const [created] = await tx
       .insert(deployments)

@@ -723,10 +723,10 @@ describe('audit', () => {
     expect(await events()).toMatchObject([
       {
         actorId: null,
-        action: 'deployment.restart',
-        targetType: 'deployment',
-        targetId: live.id,
-        metadata: { via: 'cli', project: 'shop', service: 'web' },
+        action: 'container.restart',
+        targetType: 'container',
+        targetId: 'vpsm-web-live0000',
+        metadata: { via: 'cli', project: 'shop', service: 'web', deploymentId: live.id },
       },
     ])
   })

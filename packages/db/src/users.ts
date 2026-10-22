@@ -120,6 +120,14 @@ export function listUsers(db: Db): Promise<SafeUser[]> {
   return db.select(safeUserColumns).from(users).orderBy(asc(users.email))
 }
 
+// The email is normalised like everywhere else, so callers need not know that emails are stored lowercase.
+export async function findUserByEmail(db: Db, email: string): Promise<SafeUser | null> {
+  const normalizedEmail = normalizeEmail(email)
+  if (CONTROL_CHARACTERS.test(normalizedEmail)) return null
+  const [user] = await db.select(safeUserColumns).from(users).where(eq(users.email, normalizedEmail))
+  return user ?? null
+}
+
 // Replaces the password and ends every session of that user, so a stolen session dies with the old password.
 export async function setPassword(db: Db, userId: string, password: string): Promise<void> {
   assertValidPassword(password)

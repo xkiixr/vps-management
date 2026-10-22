@@ -82,15 +82,27 @@ export async function loadActiveRoutes(
   return routes
 }
 
-/** With `panel`, the dashboard is routed too (even when no app is live) and no app can use its hostname. */
+/**
+ * With `panel`, the dashboard is routed too (even when no app is live) and no app can use its hostname. Like
+ * any other route the panel's is validated first: an invalid one is reported through `onInvalid` (as
+ * 'panel') and left out, and the app routes are still written.
+ */
 export async function regenerateRoutes(
   db: Db,
   dir: string,
-  onInvalid?: OnInvalidRoute,
+  onInvalid: OnInvalidRoute = warnInvalidRoute,
   tls?: RoutesTls,
   panel?: { domain: string; upstream: string },
 ): Promise<void> {
   const routes = await loadActiveRoutes(db, onInvalid, panel?.domain)
-  if (panel) routes.unshift({ serviceInstanceId: PANEL_ROUTE_ID, hostnames: [panel.domain], upstreamUrl: panel.upstream })
+  if (panel) {
+    const route: Route = { serviceInstanceId: PANEL_ROUTE_ID, hostnames: [panel.domain], upstreamUrl: panel.upstream }
+    try {
+      validateRoute(route)
+      routes.unshift(route)
+    } catch (error) {
+      onInvalid(PANEL_ROUTE_ID, error instanceof Error ? error.message : String(error))
+    }
+  }
   await writeRoutesFile(dir, renderRoutesYaml(routes, { tls }))
 }

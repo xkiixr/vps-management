@@ -8,6 +8,7 @@ import {
   createUser,
   type Db,
   deleteSession,
+  findUserByEmail,
   generatePassword,
   hashPassword,
   listUsers,
@@ -129,6 +130,24 @@ test('listUsers is ordered by email', async () => {
   await makeUser('alice@x.io')
   await makeUser('bob@x.io')
   expect((await listUsers(db)).map((u) => u.email)).toEqual(['alice@x.io', 'bob@x.io', 'carol@x.io'])
+})
+
+test('findUserByEmail finds a user whatever the case or padding of the email, without the password hash', async () => {
+  const created = await makeUser('alice@x.io')
+  await makeUser('bob@x.io')
+
+  const found = await findUserByEmail(db, '  Alice@X.IO ')
+
+  expect(found).toEqual(created)
+  expect('passwordHash' in found!).toBe(false)
+})
+
+test('findUserByEmail returns null for an unknown email or one with control characters', async () => {
+  await makeUser('alice@x.io')
+
+  expect(await findUserByEmail(db, 'nobody@x.io')).toBeNull()
+  expect(await findUserByEmail(db, 'alice@x.io\u0000')).toBeNull()
+  expect(await findUserByEmail(db, '')).toBeNull()
 })
 
 test('authenticate accepts the right password only', async () => {
