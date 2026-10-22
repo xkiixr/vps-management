@@ -7,6 +7,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -27,6 +28,71 @@ export const projects = pgTable('projects', {
   id: id(),
   name: text('name').notNull().unique(),
   createdAt: createdAt(),
+})
+
+export const users = pgTable(
+  'users',
+  {
+    id: id(),
+    // Always stored lowercase; the unique constraint relies on callers normalising before insert.
+    email: text('email').notNull().unique(),
+    name: text('name').notNull(),
+    passwordHash: text('password_hash').notNull(),
+    role: text('role').$type<'admin' | 'member'>().notNull(),
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [check('users_role_check', sql`${t.role} in ('admin', 'member')`)],
+)
+
+// The id is the SHA-256 hex digest of the session token; the token itself is never stored.
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: text('id').primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('sessions_user_id_idx').on(t.userId)],
+)
+
+export const projectMembers = pgTable(
+  'project_members',
+  {
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.projectId, t.userId] })],
+)
+
+export const auditEvents = pgTable(
+  'audit_events',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    actorId: uuid('actor_id').references(() => users.id, { onDelete: 'set null' }),
+    action: text('action').notNull(),
+    targetType: text('target_type').notNull(),
+    targetId: text('target_id'),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+  },
+  // nullsFirst() is Postgres's default for DESC, so `order by created_at desc` can use this index.
+  (t) => [index('audit_events_created_at_idx').on(t.createdAt.desc().nullsFirst())],
+)
+
+export const settings = pgTable('settings', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
 })
 
 export const environments = pgTable(
@@ -95,7 +161,7 @@ export const deployments = pgTable(
     rollbackOfId: uuid('rollback_of_id').references((): AnyPgColumn => deployments.id),
     configSnapshot: jsonb('config_snapshot'),
     failureReason: text('failure_reason'),
-    createdById: uuid('created_by_id'),
+    createdById: uuid('created_by_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
     claimedAt: timestamp('claimed_at', { withTimezone: true }),
     startedAt: timestamp('started_at', { withTimezone: true }),
@@ -139,6 +205,11 @@ export const domains = pgTable(
 )
 
 export type Project = typeof projects.$inferSelect
+export type User = typeof users.$inferSelect
+export type Session = typeof sessions.$inferSelect
+export type ProjectMember = typeof projectMembers.$inferSelect
+export type AuditEvent = typeof auditEvents.$inferSelect
+export type Setting = typeof settings.$inferSelect
 export type Environment = typeof environments.$inferSelect
 export type Service = typeof services.$inferSelect
 export type ServiceInstance = typeof serviceInstances.$inferSelect

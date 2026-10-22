@@ -19,7 +19,7 @@ export type DeployConfig = {
   port: number
 }
 
-export type DeploymentTrigger = 'push' | 'manual' | 'rollback' | 'config'
+export type DeploymentTrigger = 'push' | 'manual' | 'rollback' | 'config' | 'restart'
 
 export const DEFAULT_BUILD_CONFIG: BuildConfig = { builder: 'auto' }
 
