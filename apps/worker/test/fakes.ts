@@ -156,7 +156,8 @@ export class FakeDocker implements DockerRuntime {
     const container = this.containers.get(name)
     if (!container) throw new Error(`no container ${name}`)
     this.events.push(`restart ${name}`)
-    container.state = { ...container.state, running: true, restarting: false, restartCount: container.state.restartCount + 1 }
+    // Like `docker restart`: Docker's RestartCount only counts restarts by the restart policy.
+    container.state = { ...container.state, running: true, restarting: false }
   }
 
   async listManaged(): Promise<ManagedContainer[]> {

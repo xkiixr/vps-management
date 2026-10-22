@@ -15,6 +15,7 @@ import {
   services,
 } from '@vpsm/db'
 import { loadConfig, type WorkerConfig } from './config'
+import { MIN_MEMORY_MB } from './runtime/container-spec'
 import { createDockerRuntime, type DockerRuntime } from './runtime/docker-runtime'
 
 export type CliDeps = { db: Db; docker: DockerRuntime; config: WorkerConfig; out: (line: string) => void }
@@ -90,6 +91,7 @@ const COMMANDS: Record<string, Command> = {
       const port = positiveInt('--port', c.flags.port)
       const memory = positiveInt('--memory', c.flags.memory)
       if (port !== undefined && port > MAX_PORT) throw new CliError(`--port must be at most ${MAX_PORT}`)
+      if (memory !== undefined && memory < MIN_MEMORY_MB) throw new CliError(`--memory must be at least ${MIN_MEMORY_MB}`)
       if (memory !== undefined && memory > c.config.maxServiceMemoryMb) {
         throw new CliError(`--memory exceeds the per-service max of ${c.config.maxServiceMemoryMb} MB`)
       }

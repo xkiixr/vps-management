@@ -98,8 +98,56 @@ test('with startStopped, a stopped live container is started again and stays SUC
   expect(await reconcileLiveDeployments(deps, { startStopped: true })).toEqual({ crashed: 0, started: 1 })
 
   expect(deps.events).toEqual(['restart vpsm-web-live'])
-  expect((await deps.docker.state('vpsm-web-live')).running).toBe(true)
+  // Like `docker restart`: running again, and Docker's own restart counter is not bumped.
+  expect(await deps.docker.state('vpsm-web-live')).toMatchObject({ running: true, restartCount: 10 })
   expect((await get(d)).status).toBe('SUCCESS')
+})
+
+test('a docker error on one container is logged and the other containers are still checked', async () => {
+  await live('web')
+  deps.docker.setState('vpsm-web-live', stopped())
+  await live('api')
+  deps.docker.setState('vpsm-api-live', stopped())
+  // Whichever container is checked first fails, e.g. while Docker is removing it.
+  const original = deps.docker.state.bind(deps.docker)
+  let failed: string | undefined
+  vi.spyOn(deps.docker, 'state').mockImplementation(async (name) => {
+    if (failed === undefined) {
+      failed = name
+      throw new Error(`(HTTP code 409) unexpected - removal of container ${name} is already in progress`)
+    }
+    return original(name)
+  })
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+  expect(await reconcileLiveDeployments(deps, { startStopped: true })).toEqual({ crashed: 0, started: 1 })
+
+  const other = failed === 'vpsm-web-live' ? 'vpsm-api-live' : 'vpsm-web-live'
+  expect(deps.events).toEqual([`restart ${other}`])
+  expect(error).toHaveBeenCalledOnce()
+  expect(error).toHaveBeenCalledWith(expect.stringContaining(`${failed}: (HTTP code 409)`))
+})
+
+test('a container whose deployment cannot be marked CRASHED does not stop the others', async () => {
+  const web = await live('web', { container: false })
+  const api = await live('api', { container: false })
+  // Whichever is checked first: its row vanishes meanwhile, so marking it CRASHED throws (not found).
+  const original = deps.docker.state.bind(deps.docker)
+  let first: Deployment | undefined
+  vi.spyOn(deps.docker, 'state').mockImplementation(async (name) => {
+    if (first === undefined) {
+      first = name === 'vpsm-web-live' ? web : api
+      await db.delete(deployments).where(eq(deployments.id, first.id))
+    }
+    return original(name)
+  })
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+  expect(await reconcileLiveDeployments(deps, { startStopped: false })).toEqual({ crashed: 1, started: 0 })
+
+  const other = first === web ? api : web
+  expect((await get(other)).status).toBe('CRASHED')
+  expect(error).toHaveBeenCalledOnce()
 })
 
 test('with startStopped, a failed start marks the deployment CRASHED with the reason', async () => {

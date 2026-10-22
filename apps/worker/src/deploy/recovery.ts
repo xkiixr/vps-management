@@ -8,6 +8,8 @@ import type { PipelineDeps } from './pipeline'
 
 const INTERRUPTED_REASON = 'worker restarted during deployment'
 
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
 /**
  * Run once at startup, before the deploy loop: no deployment can be running yet, so anything the last
  * worker left mid-flight is cleaned up, in this order:
@@ -19,6 +21,8 @@ const INTERRUPTED_REASON = 'worker restarted during deployment'
  *    container has lost them);
  * 5. the routes file is rewritten from the database, so no route points at an orphan any more;
  * 6. managed containers whose deployment is not SUCCESS or CRASHED (or no longer exists) are removed.
+ * A Docker error on one container in steps 3 and 6 is logged and the others are still handled, so it
+ * cannot make the worker fail at every start.
  */
 export async function recoverInterruptedDeployments(
   deps: PipelineDeps,
@@ -50,9 +54,19 @@ export async function recoverInterruptedDeployments(
     .where(inArray(deployments.status, ['SUCCESS', 'CRASHED']))
   const keep = new Set(current.map((d) => d.id))
   const orphans = (await docker.listManaged()).filter((c) => !keep.has(c.deploymentId))
-  for (const { name } of orphans) await docker.stopAndRemove(name, 0)
+  let removedContainers = 0
+  for (const { name } of orphans) {
+    // One container Docker will not remove (e.g. 409: removal already in progress) must not stop the
+    // worker from starting; it is tried again on the next start.
+    try {
+      await docker.stopAndRemove(name, 0)
+      removedContainers++
+    } catch (error) {
+      console.error(`recovery: could not remove orphaned container ${name}: ${messageOf(error)}`)
+    }
+  }
 
-  return { failed: interrupted.length, removedContainers: orphans.length }
+  return { failed: interrupted.length, removedContainers }
 }
 
 /** Removes everything in `workDir` (config guarantees it is a dedicated directory) but keeps the directory itself. */

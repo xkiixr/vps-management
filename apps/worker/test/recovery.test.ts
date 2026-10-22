@@ -161,6 +161,49 @@ test('keeps a CRASHED deployment container, removes containers of finished or un
   expect((await get(crashed)).status).toBe('CRASHED')
 })
 
+test('an orphan that cannot be removed is logged and the other orphans are still removed', async () => {
+  seed('vpsm-web-orphan01', randomUUID())
+  seed('vpsm-web-orphan02', randomUUID())
+  seed('vpsm-web-orphan03', randomUUID())
+  const original = deps.docker.stopAndRemove.bind(deps.docker)
+  vi.spyOn(deps.docker, 'stopAndRemove').mockImplementation(async (name, timeoutSec) => {
+    if (name === 'vpsm-web-orphan01') throw new Error('(HTTP code 409) removal of container vpsm-web-orphan01 is already in progress')
+    return original(name, timeoutSec)
+  })
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    expect(await recoverInterruptedDeployments(deps)).toEqual({ failed: 0, removedContainers: 2 })
+
+    expect((await deps.docker.listManaged()).map((c) => c.name)).toEqual(['vpsm-web-orphan01'])
+    expect(error).toHaveBeenCalledOnce()
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('vpsm-web-orphan01: (HTTP code 409)'))
+  } finally {
+    error.mockRestore()
+  }
+})
+
+test('a docker error on a live container does not stop recovery', async () => {
+  const broken = await live('vpsm-web-broken0')
+  seed('vpsm-web-broken0', broken.id)
+  const gone = await live('vpsm-api-gone000')
+  const original = deps.docker.state.bind(deps.docker)
+  vi.spyOn(deps.docker, 'state').mockImplementation(async (name) => {
+    if (name === 'vpsm-web-broken0') throw new Error('(HTTP code 500) server error')
+    return original(name)
+  })
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    expect(await recoverInterruptedDeployments(deps)).toEqual({ failed: 0, removedContainers: 0 })
+
+    expect((await get(broken)).status).toBe('SUCCESS')
+    expect((await get(gone)).status).toBe('CRASHED')
+    expect(deps.events).toEqual(['routes'])
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('vpsm-web-broken0: (HTTP code 500) server error'))
+  } finally {
+    error.mockRestore()
+  }
+})
+
 test('empties the work directory, including token-bearing clones left by a crash', async () => {
   const { workDir } = deps.config
   fs.mkdirSync(path.join(workDir, 'abc', 'src', '.git'), { recursive: true })

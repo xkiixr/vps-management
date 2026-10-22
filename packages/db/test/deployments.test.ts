@@ -59,14 +59,27 @@ async function liveDeployment(instanceId: string) {
   return setDeploymentStatus(db, d.id, 'SUCCESS', { containerName: `vpsm-web-${d.id.slice(0, 8)}` })
 }
 
-// Collects NOTIFY payloads delivered on `channel` while `action` runs.
+const NOTIFY_WAIT_MS = 2000
+
+// Collects NOTIFY payloads delivered on `channel` while `action` runs. Postgres delivers notifications in
+// commit order, so once a marker sent after the action arrives, everything the action notified has arrived
+// too; that marker (or, if it never comes, NOTIFY_WAIT_MS) ends the wait.
 async function listenDuring(channel: string, action: () => Promise<unknown>): Promise<string[]> {
+  const marker = `end-of-listen-${Math.random()}`
   const payloads: string[] = []
-  const subscription = await t.sql.listen(channel, (payload) => payloads.push(payload))
+  let markerArrived: () => void = () => {}
+  const arrived = new Promise<void>((resolve) => (markerArrived = resolve))
+  const subscription = await t.sql.listen(channel, (payload) => {
+    if (payload === marker) markerArrived()
+    else payloads.push(payload)
+  })
+  let timer: NodeJS.Timeout | undefined
   try {
     await action()
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    await t.sql.notify(channel, marker)
+    await Promise.race([arrived, new Promise((resolve) => (timer = setTimeout(resolve, NOTIFY_WAIT_MS)))])
   } finally {
+    clearTimeout(timer)
     await subscription.unlisten()
   }
   return payloads

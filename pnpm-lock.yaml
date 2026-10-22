@@ -190,6 +190,9 @@ importers:
       drizzle-orm:
         specifier: ^0.45.4
         version: 0.45.4(postgres@3.4.9)
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
       yaml:
         specifier: ^2.9.1
         version: 2.9.1

@@ -186,6 +186,19 @@ describe('service:create', () => {
     expect(await cli('service:create', 'shop', 'web', '--repo', 'acme/web', '--branch', 'main', '--memory', String(max))).toBe(0)
     expect((await instanceOf('shop', 'web')).instance.deploy.memoryLimitMB).toBe(max)
   })
+
+  test('rejects a memory limit below the 6 MB Docker accepts, accepts exactly 6', async () => {
+    await cli('project:create', 'shop')
+    for (const memory of ['1', '5']) {
+      out.length = 0
+      expect(await cli('service:create', 'shop', 'web', '--repo', 'acme/web', '--branch', 'main', '--memory', memory)).toBe(1)
+      expect(out, `--memory ${memory}`).toEqual(['error: --memory must be at least 6'])
+    }
+    expect(await findServiceInstance(db, 'shop', 'web')).toBeNull()
+
+    expect(await cli('service:create', 'shop', 'web', '--repo', 'acme/web', '--branch', 'main', '--memory', '6')).toBe(0)
+    expect((await instanceOf('shop', 'web')).instance.deploy.memoryLimitMB).toBe(6)
+  })
 })
 
 describe('deploy', () => {

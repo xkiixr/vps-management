@@ -176,7 +176,8 @@ test('wakes up on notify', async () => {
   const d = await queue('web')
   listeners[0]!.notify()
 
-  await vi.waitFor(() => expect(runDeployment).toHaveBeenCalledWith(d.id, deps), { timeout: 200 })
+  // Resolves as soon as it ran; the bound only has to stay well below the 5 s poll.
+  await vi.waitFor(() => expect(runDeployment).toHaveBeenCalledWith(d.id, deps), { timeout: 2000 })
 })
 
 test('polls the queue every 5 seconds', async () => {
@@ -228,7 +229,7 @@ test('a wake-up that arrives just as the queue is found empty is not lost', asyn
 
   await vi.waitFor(() => expect(api).toBeDefined())
   // Long before the next 5 s poll.
-  await vi.waitFor(() => expect(runDeployment).toHaveBeenCalledWith(api!.id, deps), { timeout: 200 })
+  await vi.waitFor(() => expect(runDeployment).toHaveBeenCalledWith(api!.id, deps), { timeout: 2000 })
 })
 
 test('stops claiming once aborted and lets the running deployment finish', async () => {

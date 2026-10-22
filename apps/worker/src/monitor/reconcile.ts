@@ -34,6 +34,7 @@ export async function markCrashed(db: Db, deploymentId: string, failureReason: s
  * worker was not running or not subscribed). A missing container is CRASHED. A stopped one is started
  * again when `startStopped` (at worker startup, e.g. after a host reboot), or else CRASHED once Docker
  * has given up on it. Running and restarting containers, and every other deployment, are left alone.
+ * An error on one container (e.g. Docker is busy removing it) is logged and the others are still checked.
  */
 export async function reconcileLiveDeployments(
   deps: PipelineDeps,
@@ -52,20 +53,24 @@ export async function reconcileLiveDeployments(
   }
   for (const { id, containerName } of live) {
     const name = containerName!
-    const state = await docker.state(name)
-    if (!state.exists) {
-      await crash(id, 'container disappeared')
-    } else if (state.running || state.restarting) {
-      continue
-    } else if (opts.startStopped) {
-      try {
-        await docker.restart(name)
-        started++
-      } catch (error) {
-        await crash(id, `could not restart container: ${messageOf(error)}`)
+    try {
+      const state = await docker.state(name)
+      if (!state.exists) {
+        await crash(id, 'container disappeared')
+      } else if (state.running || state.restarting) {
+        continue
+      } else if (opts.startStopped) {
+        try {
+          await docker.restart(name)
+          started++
+        } catch (error) {
+          await crash(id, `could not restart container: ${messageOf(error)}`)
+        }
+      } else if (isCrashFinal(state)) {
+        await crash(id, `container exited with code ${state.exitCode}`)
       }
-    } else if (isCrashFinal(state)) {
-      await crash(id, `container exited with code ${state.exitCode}`)
+    } catch (error) {
+      console.error(`reconcile: could not check container ${name}: ${messageOf(error)}`)
     }
   }
   return { crashed, started }
