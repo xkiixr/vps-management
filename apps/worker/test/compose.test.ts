@@ -63,19 +63,40 @@ describe('web', () => {
   })
 
   // The dashboard faces the internet, so it gets exactly the settings it reads (apps/web/src/server/config.ts and
-  // limits.ts) and not the whole .env: GITHUB_TOKEN, POSTGRES_PASSWORD, ACME_EMAIL, COMPOSE_FILE and whatever is added later stay out.
+  // limits.ts) and not the whole .env: the GitHub App's id and key, POSTGRES_PASSWORD, ACME_EMAIL, COMPOSE_FILE and
+  // whatever is added later stay out. The webhook secret is the one GitHub setting it needs, to verify the signature.
   test('gets an explicit list of settings and no env_file', () => {
     expect(web.env_file).toBeUndefined()
     expect(Object.keys(web.environment ?? {}).sort()).toEqual([
       'APPS_DOMAIN',
       'DATABASE_URL',
+      'GITHUB_WEBHOOK_SECRET',
       'MAX_SERVICE_MEMORY_MB',
       'MEMORY_BUDGET_MB',
       'PANEL_DOMAIN',
       'PUBLIC_HTTPS_PORT',
     ])
     const text = JSON.stringify(web)
-    for (const secret of ['GITHUB_TOKEN', 'POSTGRES_PASSWORD', 'ACME_EMAIL', 'COMPOSE_FILE', 'DUCKDNS_TOKEN']) {
+    for (const secret of [
+      'GITHUB_APP_PRIVATE_KEY_PATH',
+      'github-app.pem',
+      'GITHUB_APP_ID',
+      'POSTGRES_PASSWORD',
+      'ACME_EMAIL',
+      'COMPOSE_FILE',
+      'DUCKDNS_TOKEN',
+    ]) {
+      expect(text).not.toContain(secret)
+    }
+  })
+
+  // The signature of a GitHub delivery is checked with this secret, so the dashboard gets it (and nothing of the App's
+  // key: that stays in the worker). Empty means the webhook answers 503.
+  test('gets the webhook secret and nothing of the app key', () => {
+    expect(Object.keys(web.environment ?? {})).toContain('GITHUB_WEBHOOK_SECRET')
+    expect(web.environment?.GITHUB_WEBHOOK_SECRET).toBe('${GITHUB_WEBHOOK_SECRET:-}')
+    const text = JSON.stringify(web)
+    for (const secret of ['GITHUB_APP_PRIVATE_KEY_PATH', 'github-app.pem', 'GITHUB_APP_ID', 'POSTGRES_PASSWORD', 'ACME_EMAIL', 'COMPOSE_FILE', 'DUCKDNS_TOKEN']) {
       expect(text).not.toContain(secret)
     }
   })
@@ -85,6 +106,7 @@ describe('web', () => {
       DATABASE_URL: expect.stringMatching(/^\$\{DATABASE_URL:\?[^}]+\}$/),
       APPS_DOMAIN: expect.stringMatching(/^\$\{APPS_DOMAIN:\?[^}]+\}$/),
       PANEL_DOMAIN: expect.stringMatching(/^\$\{PANEL_DOMAIN:\?[^}]+\}$/),
+      GITHUB_WEBHOOK_SECRET: '${GITHUB_WEBHOOK_SECRET:-}',
       PUBLIC_HTTPS_PORT: '${PUBLIC_HTTPS_PORT:-443}',
       MEMORY_BUDGET_MB: '${MEMORY_BUDGET_MB:-5632}',
       MAX_SERVICE_MEMORY_MB: '${MAX_SERVICE_MEMORY_MB:-2048}',
@@ -128,6 +150,19 @@ describe('worker', () => {
 
   test('still publishes no port', () => {
     expect(worker.ports).toBeUndefined()
+  })
+
+  // The App's private key is a file on the host, outside the repository folder. With no path set the mount is
+  // /dev/null, which the worker never reads while GITHUB_APP_ID is empty.
+  test('mounts the app key read-only, and no other service mentions it', () => {
+    expect(worker.volumes).toContain('${GITHUB_APP_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/github-app.pem:ro')
+    for (const file of [compose, override]) {
+      for (const [name, service] of Object.entries(file.services)) {
+        if (name === 'worker') continue
+        expect(JSON.stringify(service), name).not.toMatch(/github-app\.pem|GITHUB_APP_PRIVATE_KEY/)
+      }
+    }
+    expect(JSON.stringify(override.services.worker)).not.toMatch(/github-app\.pem|GITHUB_APP_PRIVATE_KEY/)
   })
 })
 

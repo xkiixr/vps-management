@@ -85,6 +85,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - vpsm-traefik-dynamic:/traefik/dynamic
       - vpsm-work:/var/lib/vpsm/work
+      # The GitHub App's private key: a file on this server, outside the repository folder (docs/operations.md,
+      # "GitHub App"). It is mounted read-only, into the worker only. Unset, this is an empty file, which the worker
+      # does not read as long as GITHUB_APP_ID is empty. The file must exist before `up`, or Docker makes a directory.
+      - ${GITHUB_APP_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/github-app.pem:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,13 +125,16 @@ services:
     oom_score_adj: -900
     logging: *logging
     # No env_file: the dashboard faces the internet, so it gets exactly the settings it reads (apps/web/src/server/
-    # config.ts and limits.ts) and not the whole .env, which also holds GITHUB_TOKEN, the database password and more.
-    # The values come from .env (or the shell) through Compose's own interpolation; docker-compose.dns-tls.yml
-    # overrides PUBLIC_HTTPS_PORT. Do not add a variable here unless the dashboard reads it.
+    # config.ts and limits.ts) and not the whole .env, which also holds the GitHub App's id and key path, the
+    # database password and more. The values come from .env (or the shell) through Compose's own interpolation;
+    # docker-compose.dns-tls.yml overrides PUBLIC_HTTPS_PORT. Do not add a variable here unless the dashboard reads
+    # it. GITHUB_WEBHOOK_SECRET is the one GitHub setting it reads (to check the signature of a webhook delivery);
+    # the App's private key is never given to it, see the worker.
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
       APPS_DOMAIN: ${APPS_DOMAIN:?set APPS_DOMAIN in .env}
       PANEL_DOMAIN: ${PANEL_DOMAIN:?set PANEL_DOMAIN in .env (for example panel.apps.example.com)}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       PUBLIC_HTTPS_PORT: ${PUBLIC_HTTPS_PORT:-443}
       MEMORY_BUDGET_MB: ${MEMORY_BUDGET_MB:-5632}
       MAX_SERVICE_MEMORY_MB: ${MAX_SERVICE_MEMORY_MB:-2048}
