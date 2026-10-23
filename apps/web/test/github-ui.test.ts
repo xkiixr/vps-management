@@ -22,15 +22,23 @@ const repository: GithubRepository = {
 
 describe('pushDeployNote', () => {
   test.each([
-    ['a service without a source', { source: null, status, repository }, null],
+    ['a service without a source', { source: null, status, repository, webhookConfigured: false }, null],
     [
       'no GitHub App status',
-      { source, status: null, repository: null },
+      { source, status: null, repository: null, webhookConfigured: false },
       { tone: 'warning', text: 'The GitHub App is not set up: pushes do not deploy this service.' },
     ],
     [
+      'no webhook secret on the dashboard',
+      { source, status, repository, webhookConfigured: false },
+      {
+        tone: 'warning',
+        text: 'The dashboard has no webhook secret (GITHUB_WEBHOOK_SECRET): pushes do not deploy this service.',
+      },
+    ],
+    [
       'a repository the App cannot read',
-      { source, status, repository: null },
+      { source, status, repository: null, webhookConfigured: true },
       {
         tone: 'warning',
         text: 'The GitHub App cannot read acme/web: pushes do not deploy it, and it builds only if the repository is public.',
@@ -38,16 +46,23 @@ describe('pushDeployNote', () => {
     ],
     [
       'a repository the App can read',
-      { source, status, repository },
+      { source, status, repository, webhookConfigured: true },
       { tone: 'ok', text: 'Every push to release deploys this service.' },
     ],
   ])('%s', (_name, input, expected) => {
     expect(pushDeployNote(input)).toEqual(expected)
   })
 
+  test('without a webhook secret, a repository the App cannot read still says the secret is missing first', () => {
+    expect(pushDeployNote({ source, status, repository: null, webhookConfigured: false })).toEqual({
+      tone: 'warning',
+      text: 'The dashboard has no webhook secret (GITHUB_WEBHOOK_SECRET): pushes do not deploy this service.',
+    })
+  })
+
   test('a status that reports an error still counts as set up: the repository list decides', () => {
     const failing: GithubStatus = { ok: false, checkedAt: status.checkedAt, error: 'bad credentials' }
-    expect(pushDeployNote({ source, status: failing, repository })).toEqual({
+    expect(pushDeployNote({ source, status: failing, repository, webhookConfigured: true })).toEqual({
       tone: 'ok',
       text: 'Every push to release deploys this service.',
     })

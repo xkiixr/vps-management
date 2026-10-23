@@ -220,7 +220,17 @@ export async function loadGithubAppKey(
   file: string,
   readFile: (file: string) => Promise<Buffer> = (f) => fs.readFile(f),
 ): Promise<KeyObject> {
-  const content = await readFile(file)
+  let content: Buffer
+  try {
+    content = await readFile(file)
+  } catch (error) {
+    // Node's own message names neither the setting nor, for EISDIR (Docker made a directory for a missing host
+    // file), the file. No `cause`, so nothing else is carried along.
+    const code = (error as { code?: unknown } | null)?.code
+    throw new Error(
+      `GitHub App private key at ${file} cannot be read (${typeof code === 'string' ? code : 'unknown'}); check GITHUB_APP_PRIVATE_KEY_PATH in .env`,
+    )
+  }
   if (content.toString('utf8').trim() === '') {
     throw new Error(`GitHub App private key at ${file} is empty (set GITHUB_APP_PRIVATE_KEY_PATH in .env)`)
   }

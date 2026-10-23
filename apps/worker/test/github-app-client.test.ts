@@ -397,9 +397,35 @@ test('loadGithubAppKey reads the file from disk by default', async () => {
     const file = path.join(dir, 'app.pem')
     fs.writeFileSync(file, pem(privateKey))
     expect((await loadGithubAppKey(file)).asymmetricKeyType).toBe('rsa')
-    await expect(loadGithubAppKey(path.join(dir, 'missing.pem'))).rejects.toThrow()
+    const missing = path.join(dir, 'missing.pem')
+    await expect(loadGithubAppKey(missing)).rejects.toThrow(
+      `GitHub App private key at ${missing} cannot be read (ENOENT); check GITHUB_APP_PRIVATE_KEY_PATH in .env`,
+    )
+    // What Docker leaves when the host file was missing at the first start: a directory in its place.
+    await expect(loadGithubAppKey(dir)).rejects.toThrow(
+      `GitHub App private key at ${dir} cannot be read (EISDIR); check GITHUB_APP_PRIVATE_KEY_PATH in .env`,
+    )
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('loadGithubAppKey names the file and the reason when it cannot be read, and nothing of Node\'s own message', async () => {
+  const file = '/run/secrets/github-app.pem'
+  const failWith = (code: string | undefined, message: string) => async (): Promise<Buffer> => {
+    throw Object.assign(new Error(message), code === undefined ? {} : { code })
+  }
+  const cases = [
+    ['EISDIR', failWith('EISDIR', 'EISDIR: illegal operation on a directory, read')],
+    ['ENOENT', failWith('ENOENT', `ENOENT: no such file or directory, open '${file}'`)],
+    ['EACCES', failWith('EACCES', `EACCES: permission denied, open '${file}'`)],
+    ['unknown', failWith(undefined, 'something odd')],
+  ] as const
+  for (const [code, readFile] of cases) {
+    const error = (await loadGithubAppKey(file, readFile).catch((e: unknown) => e)) as Error
+    expect(error.message).toBe(`GitHub App private key at ${file} cannot be read (${code}); check GITHUB_APP_PRIVATE_KEY_PATH in .env`)
+    expect(error.message).not.toMatch(/illegal operation|no such file|permission denied|something odd/)
+    expect(error.cause).toBeUndefined()
   }
 })
 

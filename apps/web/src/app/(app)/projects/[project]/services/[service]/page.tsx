@@ -43,7 +43,7 @@ export default async function ServicePage({ params }: Props) {
   const { project: projectName, service: serviceName } = await params
   const user = await requireUser()
   const db = getDb()
-  const { httpsPort } = webConfig()
+  const { httpsPort, githubWebhookSecret } = webConfig()
   // A project or service that does not exist and one the user may not see are the same 404.
   const project = await findProjectFor(db, { id: user.id, role: user.role }, projectName)
   if (!project) notFound()
@@ -58,7 +58,12 @@ export default async function ServicePage({ params }: Props) {
   ])
 
   const { service, instance, url, latest } = row
-  const pushNote = pushDeployNote({ source: instance.source, status: githubStatus, repository })
+  const pushNote = pushDeployNote({
+    source: instance.source,
+    status: githubStatus,
+    repository,
+    webhookConfigured: githubWebhookSecret !== undefined,
+  })
   // Only these settings go to the browser, as text for the form.
   const settings: ServiceSettings = {
     repo: instance.source?.repo ?? '',

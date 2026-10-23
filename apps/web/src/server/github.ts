@@ -14,16 +14,25 @@ export type PushDeployNote = { tone: 'ok' | 'warning'; text: string }
 
 /**
  * What the service page says about deploying on push, or null for a service without a source (nothing to push).
- * A push deploys the service only when the App is set up and can read the repository; a public repository still
- * builds without the App, but a push never reaches it.
+ * A push deploys the service only when the App is set up, the dashboard has the webhook secret to check deliveries
+ * with (without it every delivery is a 503), and the App can read the repository; a public repository still builds
+ * without the App, but a push never reaches it.
  */
 export function pushDeployNote(i: {
   source: SourceConfig | null
   status: GithubStatus | null
   repository: GithubRepository | null
+  /** Whether GITHUB_WEBHOOK_SECRET is set for the dashboard. */
+  webhookConfigured: boolean
 }): PushDeployNote | null {
   if (!i.source) return null
   if (!i.status) return { tone: 'warning', text: 'The GitHub App is not set up: pushes do not deploy this service.' }
+  if (!i.webhookConfigured) {
+    return {
+      tone: 'warning',
+      text: 'The dashboard has no webhook secret (GITHUB_WEBHOOK_SECRET): pushes do not deploy this service.',
+    }
+  }
   if (!i.repository) {
     return {
       tone: 'warning',
