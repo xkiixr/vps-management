@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { expect, test } from 'vitest'
 import { createAppJwt, createGithubAppClient, GithubApiError, loadGithubAppKey } from '../src/github/app-client'
+import { githubCloneUrl } from '../src/source/fetch-source'
 
 // Generated here: no test reads a real key.
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
@@ -156,8 +157,42 @@ test('an answer that is not what the call returns is a GithubApiError, not a Typ
   await expect(noToken.client.repositoryToken('acme/web')).rejects.toBeInstanceOf(GithubApiError)
 })
 
-test.each(['', 'ghs_bad token', 'ghs_bad\r\nX-Injected: 1', 'ghs_bad@evil.example', 'ghs_bäd', 'ghs/../bad'])(
-  'repositoryToken refuses a token of an odd shape (%j) as an unexpected answer that does not repeat it',
+// The format GitHub has issued since 2026 (changelog 2026-04-24): `ghs_<app id>_<JWT>`, around 520 characters, the
+// JWT in base64url with dots between its parts. The old one was `ghs_` and 36 letters and digits.
+const NEW_FORMAT_TOKEN = `ghs_5435849_eyJhbGciOiJSUzI1NiJ9.${'eyJpc3MiOiI1NDM1ODQ5In0-_'.repeat(18)}.${'c2lnbmF0dXJl-_'.repeat(9)}`
+
+test('repositoryToken accepts a token in the current format and clones with it', async () => {
+  expect(NEW_FORMAT_TOKEN.length).toBeGreaterThan(500)
+  const { client } = clientFor((call) =>
+    route(call) === 'GET /repos/acme/web/installation'
+      ? { json: { id: 7 } }
+      : { status: 201, json: { token: NEW_FORMAT_TOKEN } },
+  )
+
+  await expect(client.repositoryToken('acme/web')).resolves.toBe(NEW_FORMAT_TOKEN)
+  // Nothing in it needs escaping in the userinfo of the clone URL.
+  expect(new URL(githubCloneUrl('acme/web', NEW_FORMAT_TOKEN)).password).toBe(NEW_FORMAT_TOKEN)
+})
+
+test('listRepositories lists with a token in the current format', async () => {
+  const { client, calls } = clientFor((call) => {
+    switch (route(call)) {
+      case 'GET /app/installations':
+        return { json: [{ id: 7, account: { login: 'acme' } }] }
+      case 'POST /app/installations/7/access_tokens':
+        return { status: 201, json: { token: NEW_FORMAT_TOKEN } }
+      case 'GET /installation/repositories':
+        return { json: { total_count: 0, repositories: [] } }
+    }
+    return { status: 500, json: { message: 'unexpected call' } }
+  })
+
+  await expect(client.listRepositories()).resolves.toEqual({ installations: [{ id: 7, account: 'acme' }], repositories: [] })
+  expect(bearer(calls.at(-1)!)).toBe(NEW_FORMAT_TOKEN)
+})
+
+test.each(['', 'ghs_bad token', 'ghs_bad\r\nX-Injected: 1', 'ghs_bad@evil.example', 'ghs_bäd', 'ghs/../bad', 'ghs_a:b', 'ghs_a?b'])(
+  'repositoryToken refuses a token of an odd shape (%j) without repeating it',
   async (token) => {
     const { client, calls } = clientFor((call) =>
       route(call) === 'GET /repos/acme/web/installation' ? { json: { id: 7 } } : { status: 201, json: { token } },
@@ -167,7 +202,7 @@ test.each(['', 'ghs_bad token', 'ghs_bad\r\nX-Injected: 1', 'ghs_bad@evil.exampl
 
     expect(error).toBeInstanceOf(GithubApiError)
     expect(error.status).toBe(201)
-    expect(error.message).toBe('GitHub API POST /app/installations/7/access_tokens: 201 unexpected answer')
+    expect(error.message).toBe('GitHub API POST /app/installations/7/access_tokens: 201 the token is not in a known format')
     expect(calls).toHaveLength(2)
   },
 )
@@ -186,7 +221,7 @@ test('listRepositories refuses an installation token of an odd shape before usin
   const error = (await client.listRepositories().catch((e: unknown) => e)) as GithubApiError
 
   expect(error).toBeInstanceOf(GithubApiError)
-  expect(error.message).toBe('GitHub API POST /app/installations/7/access_tokens: 201 unexpected answer')
+  expect(error.message).toBe('GitHub API POST /app/installations/7/access_tokens: 201 the token is not in a known format')
   expect(error.message).not.toContain('ghs_bad')
   // The token never went out in an Authorization header.
   expect(calls.map(route)).toEqual(['GET /app/installations', 'POST /app/installations/7/access_tokens'])

@@ -23,9 +23,12 @@ const PAGE_SIZE = 100
 const MAX_DETAIL_LENGTH = 200
 // The same shape fetch-source accepts for a clone URL.
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
-// What GitHub's tokens are made of. Anything else is not one: a control character would end up in Node's "invalid
-// header value" message, and the token is about to go into an Authorization header and a clone URL.
-const TOKEN_PATTERN = /^[A-Za-z0-9_]+$/
+// What GitHub's tokens are made of. Since 2026 an installation token is `ghs_<app id>_<JWT>`, some 520 characters
+// of letters, digits, `_`, `-` and `.` (the JWT is base64url with dots between its parts), and its length varies:
+// only the characters are checked. Anything else is not a token: a control character would end up in Node's
+// "invalid header value" message, and the token is about to go into an Authorization header and into the userinfo
+// of a clone URL, where none of these characters needs escaping.
+const TOKEN_PATTERN = /^[A-Za-z0-9_.-]+$/
 
 /**
  * The JWT with which the app itself speaks to GitHub: RS256, issued 60 s in the past (GitHub rejects a token from
@@ -140,8 +143,10 @@ export function createGithubAppClient(o: GithubAppClientOptions): GithubAppClien
       ...(repository === undefined ? {} : { body: { repositories: [repository], permissions: { contents: 'read' } } }),
     })
     const token = field<string>(reply, object(reply), 'token', 'string')
-    // The error is about the shape of the answer and does not repeat the token.
-    if (!TOKEN_PATTERN.test(token)) throw unexpected(reply)
+    // The error says what is wrong without repeating the token.
+    if (!TOKEN_PATTERN.test(token)) {
+      throw new GithubApiError(`GitHub API ${reply.label}: ${reply.status} the token is not in a known format`, reply.status)
+    }
     return token
   }
 
