@@ -24,7 +24,7 @@ private key ของ GitHub App ไม่อยู่ใน volume: เป็�
 - คำสั่ง `docker` ทุกคำสั่งในคู่มือนี้ (หลังรันสคริปต์ติดตั้ง) ขึ้นต้นด้วย `sudo` เพราะสคริปต์ไม่ได้เพิ่มผู้ใช้เข้ากลุ่ม `docker` และไม่แนะนำให้เพิ่ม: สมาชิกกลุ่ม `docker` ได้สิทธิ์เทียบเท่า root โดยไม่ต้องใส่รหัสผ่าน การใช้ `sudo` ทำให้ทุกคำสั่งต้องยืนยันตัวตนและถูกบันทึกไว้
 - ไฟล์ `.env` เก็บรหัสผ่านฐานข้อมูลและ `GITHUB_WEBHOOK_SECRET` ห้าม commit (อยู่ใน `.gitignore` แล้ว) และควรสั่ง `chmod 600 .env`
 - **private key ของ GitHub App อยู่ที่ `worker` เท่านั้น** เป็นไฟล์บนเครื่อง VPS นอกโฟลเดอร์ของ repo (โฟลเดอร์ `700` ไฟล์ `600`) ที่ mount แบบอ่านอย่างเดียวเข้า worker ไม่ใส่ใน `.env` ไม่ commit ไม่แปะในแชทหรือ ticket และห้ามเปิดหรือเลือกไฟล์นี้ใน editor ที่มี AI assistant (รายละเอียดและวิธีเปลี่ยน key ที่หัวข้อ "GitHub App") ตัว App ให้สิทธิ์ Contents อ่านอย่างเดียวและเลือกติดตั้งเฉพาะ repo ที่จะ deploy
-- `POST /api/github/webhook` เป็นทางเดียวของ panel ที่ไม่ใช้ session และไม่ตรวจ `Origin` เพราะผู้ส่งคือ GitHub ไม่ใช่ browser: ยืนยันตัวตนด้วยลายเซ็น `X-Hub-Signature-256` (HMAC-SHA256 ของ body จริงด้วย `GITHUB_WEBHOOK_SECRET`) อย่างเดียว ลายเซ็นไม่ถูกต้องตอบ `401` ไม่ตั้ง secret ตอบ `503` และ body เกิน 25 MiB ตอบ `413` จึงต้องใช้ secret ที่สุ่มยาวๆ (`openssl rand -hex 32`) และไม่ใช้ซ้ำกับที่อื่น
+- `POST /api/github/webhook` เป็นทางเดียวของ panel ที่ไม่ใช้ session และไม่ตรวจ `Origin` เพราะผู้ส่งคือ GitHub ไม่ใช่ browser: ยืนยันตัวตนด้วยลายเซ็น `X-Hub-Signature-256` (HMAC-SHA256 ของ body จริงด้วย `GITHUB_WEBHOOK_SECRET`) อย่างเดียว ลายเซ็นไม่ถูกต้องตอบ `401` ไม่ตั้ง secret ตอบ `503` ทันทีโดยไม่อ่าน body และ body เกิน 25 MiB ตอบ `413` ลายเซ็นตรวจได้หลังได้ body ครบเท่านั้น panel จึงถือ body ของทุก delivery ที่ยังไม่จบรวมกันได้ไม่เกิน 50 MiB (เกินแล้วตอบ `503` พร้อม `Retry-After: 10`) และให้เวลาส่ง body 30 วินาที (เกินแล้วตอบ `408`) เพื่อไม่ให้ใครทำให้ memory ของ `web` (เพดาน 512 MB) หมดด้วย body ที่ไม่มีลายเซ็น จึงต้องใช้ secret ที่สุ่มยาวๆ (`openssl rand -hex 32`) และไม่ใช้ซ้ำกับที่อื่น
 - Traefik ไม่ได้เปิด API/dashboard ของตัวเอง หน้าเว็บบริหารมีหน้าเดียวคือ panel ของระบบนี้ (หัวข้อ "Dashboard") ซึ่งต้องล็อกอินก่อนใช้งานทุกหน้า
 - port ที่ Docker เปิด (`ports:`) ผ่านกฎ iptables ของ Docker และ **ไม่ถูก ufw กรอง** ในแผนนี้ compose เปิดแค่ 80 และ 443 จึงปลอดภัย แต่ถ้าเพิ่ม `ports:` ให้ service ใดต้องรู้ข้อนี้ไว้
 
@@ -110,7 +110,7 @@ nano .env
 | `MEMORY_BUDGET_MB` | งบ RAM รวมของแอปผู้ใช้ ค่าเริ่มต้น 5632 MB (ตั้งไว้ตั้งแต่ก่อนมี `web` โดยเหลือ 2560 MB ไว้ให้ control plane และระบบ) ตอนนี้เพดานของ control plane รวม 2048 MB (postgres 512 + traefik 256 + worker 768 + web 512) 5632 + 2048 = 7680 MB จึงเหลือให้ระบบปฏิบัติการและ cache เพียงราว 512 MB ถ้าทุกส่วนใช้เต็มเพดาน และเมื่อรวม builder อีก 3072 MB เพดานรวมเกิน 8 GB ตามที่ตั้งใจและอธิบายไว้ในหัวข้อ "หน่วยความจำและ swap" (ควรมี swap หรือลดค่านี้) เกินงบแล้วปฏิเสธการ deploy ทันที |
 | `MAX_SERVICE_MEMORY_MB` | memory สูงสุดต่อ service (ค่าเริ่มต้น 2048) |
 | `GITHUB_APP_ID` | App ID (ตัวเลข) ของ GitHub App ของทีม เว้นว่างได้: ระบบจะ clone ได้เฉพาะ repo public ดูหัวข้อ "GitHub App" |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | path **บนเครื่อง VPS** ของไฟล์ private key (`.pem`) ของ App เช่น `/var/opt/vps-engine/secrets/github-app.pem` (นอกโฟลเดอร์ของ repo, `chmod 600`) mount อ่านอย่างเดียวเข้า worker ตัวเดียว ต้องตั้งเมื่อตั้ง `GITHUB_APP_ID` และไฟล์ต้องมีอยู่ก่อนสั่ง `up -d` |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | path แบบเต็ม (absolute ขึ้นต้นด้วย `/`) **บนเครื่อง VPS** ของไฟล์ private key (`.pem`) ของ App เช่น `/var/opt/vps-engine/secrets/github-app.pem` (นอกโฟลเดอร์ของ repo, `chmod 600`) mount อ่านอย่างเดียวเข้า worker ตัวเดียว ต้องตั้งเมื่อตั้ง `GITHUB_APP_ID` และไฟล์ต้องมีอยู่ก่อนสั่ง `up -d` |
 | `GITHUB_WEBHOOK_SECRET` | secret ของ webhook (ยาวอย่างน้อย 16 ตัวอักษร เช่น `openssl rand -hex 32`) ต้องเป็นค่าเดียวกับที่ตั้งไว้ใน GitHub App เว้นว่างได้: webhook ตอบ `503` และ push ไม่ deploy อะไร |
 
 ถ้าไม่ตั้ง `POSTGRES_PASSWORD`, `ACME_EMAIL` หรือ `PANEL_DOMAIN` คำสั่ง `docker compose` จะหยุดพร้อมข้อความบอกตัวแปรที่ขาด ส่วนสามตัวสุดท้าย (GitHub App) เว้นว่างได้ ระบบเริ่มทำงานได้ตามปกติแต่ยังไม่เชื่อม GitHub ตั้งค่าตามหัวข้อ "GitHub App"
@@ -209,9 +209,10 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
 | panel เปิดได้แต่ล็อกอินหรือกดปุ่มแล้วขึ้น error `cross-origin request refused` | ต้องเปิดที่ `https://<PANEL_DOMAIN>` (บวก `:8443` ในโหมด port อื่น) ตรงตัวอักษร ไม่ใช่ผ่าน IP หรือชื่ออื่น เพราะทุก action ตรวจ header `Origin` กับชื่อนี้ |
 | `docker compose up` รอ `worker` แล้วฟ้อง `unhealthy` ทำให้ `web` ไม่เริ่ม | worker ยังไม่ migrate/กู้งานค้างเสร็จ ดู `sudo docker compose logs worker` บรรทัด `worker: …` (มักเป็น `APPS_DOMAIN` หรือ `PANEL_DOMAIN` ไม่ถูกต้อง: ในโหมด port อื่น `PANEL_DOMAIN` ต้องเป็น `panel.<APPS_DOMAIN>` ระดับเดียว) แก้แล้วสั่ง `sudo docker compose up -d` ใหม่ |
 | ลืมรหัสผ่านของ admin | `sudo docker compose exec worker node dist/cli.js user:reset-password <อีเมล>` (พิมพ์รหัสใหม่ครั้งเดียว) |
-| worker ปิดตัวแล้วเริ่มใหม่วนซ้ำ และ log มี `GitHub App private key at … is empty` / `is not a valid RSA private key` / `EISDIR` | key ของ GitHub App อ่านไม่ได้: ตรวจว่า `GITHUB_APP_PRIVATE_KEY_PATH` ใน `.env` ตั้งแล้วและชี้ไปที่ไฟล์ `.pem` ที่มีเนื้อหาจริง (ว่าง = ไม่ได้ตั้ง path) `EISDIR` แปลว่าตอนสั่ง `up -d` ไม่มีไฟล์ตาม path นั้น Docker จึงสร้างเป็นโฟลเดอร์ ให้ `sudo docker compose stop worker`, ลบโฟลเดอร์ที่ถูกสร้าง (`sudo rmdir <path>`), ใส่ไฟล์จริงแล้ว `sudo docker compose up -d` |
-| หน้า Admin → GitHub แสดง Status เป็น Error | อ่านข้อความใต้ Status (ขึ้นต้นด้วย `GitHub API …`) สาเหตุที่พบบ่อย: App ID ไม่ตรงกับ key (ตรวจ fingerprint ตามหัวข้อ "GitHub App"), นาฬิกาของเครื่องเพี้ยน (`timedatectl`), IP ของ VPS ไม่อยู่ใน IP allow list ของ org (ทั้ง IPv4 และ IPv6) หรือเครื่องออก `api.github.com` ไม่ได้ แก้แล้วกด **Sync now** |
-| push แล้ว service ไม่ deploy | ดูใน GitHub: หน้า App → Advanced → Recent Deliveries ของ delivery นั้น `503` = ยังไม่ได้ตั้ง `GITHUB_WEBHOOK_SECRET` ใน `.env` (แล้ว `sudo docker compose up -d`), `401` = secret ใน GitHub ไม่ตรงกับ `.env`, ไม่มี delivery เลย = Webhook URL ผิดหรือ GitHub เข้า panel ไม่ถึง (ตรวจ port และ firewall) ถ้าได้ `202` ให้ดู Admin → GitHub ช่อง Last webhook: `202 queued: 0` แปลว่าไม่มี service ที่ repo (`owner/name`) กับ branch ตรงกับ push นั้น ตรวจ repo และ branch ในหน้าตั้งค่าของ service (branch ต้องตรงทุกตัวอักษร) |
+| worker ปิดตัวแล้วเริ่มใหม่วนซ้ำ และ log มี `GitHub App private key at … is empty` / `is not a valid RSA private key` / `cannot be read (EISDIR)` (หรือรหัสอื่นในวงเล็บ) | key ของ GitHub App อ่านไม่ได้: ตรวจว่า `GITHUB_APP_PRIVATE_KEY_PATH` ใน `.env` ตั้งแล้ว เป็น path เต็มบนเครื่อง VPS และชี้ไปที่ไฟล์ `.pem` ที่มีเนื้อหาจริง (ว่าง = ไม่ได้ตั้ง path) `EISDIR` แปลว่าตอนสั่ง `up -d` ไม่มีไฟล์ตาม path นั้น Docker จึงสร้างเป็นโฟลเดอร์ ให้ `sudo docker compose stop worker`, ลบโฟลเดอร์ที่ถูกสร้าง (`sudo rmdir <path>`), ใส่ไฟล์จริงแล้ว `sudo docker compose up -d` |
+| หน้า Admin → GitHub แสดง Status เป็น Error | อ่านข้อความใต้ Status (ขึ้นต้นด้วย `GitHub API …`) สาเหตุที่พบบ่อย: App ID ไม่ตรงกับ key (ตรวจ fingerprint ตามหัวข้อ "GitHub App"), นาฬิกาของเครื่องเพี้ยน (`timedatectl`), IP ของ VPS ไม่อยู่ใน IP allow list ของ org หรือของตัว App (ทั้ง IPv4 และ IPv6) หรือเครื่องออก `api.github.com` ไม่ได้ แก้แล้วกด **Sync now** |
+| หน้าของ service ขึ้นคำเตือนว่า push ไม่ deploy | `The GitHub App is not set up: …` = worker ไม่มี `GITHUB_APP_ID` (หน้า Admin → GitHub ขึ้น `Not set up`): ตั้ง `GITHUB_APP_ID` และ key ตามหัวข้อ "GitHub App" `The dashboard has no webhook secret (GITHUB_WEBHOOK_SECRET): …` = panel ไม่มี secret จึงตอบ `503` ทุก delivery: ตั้ง `GITHUB_WEBHOOK_SECRET` ใน `.env` (ค่าเดียวกับ Secret ใน GitHub App) แล้ว `sudo docker compose up -d` `The GitHub App cannot read <owner/name>: …` = App ไม่ได้ติดตั้งให้ repo นั้น: เพิ่ม repo ที่ Settings ของ org → GitHub Apps → Configure แล้วกด **Sync now** ใน Admin → GitHub (และตรวจชื่อ repo ในหน้าตั้งค่าของ service) |
+| push แล้ว service ไม่ deploy | ดูใน GitHub: หน้า App → Advanced → Recent Deliveries ของ delivery นั้น `503` ที่ body เป็น `GitHub integration is not configured` = ยังไม่ได้ตั้ง `GITHUB_WEBHOOK_SECRET` ใน `.env` (แล้ว `sudo docker compose up -d`), `503` ที่ body เป็น `too many webhook deliveries in progress` หรือ `408` = panel กำลังรับ body ใหญ่ๆ อยู่หลายตัวพร้อมกัน หรือ body มาไม่ครบใน 30 วินาที กด **Redeliver** ภายหลัง, `401` = secret ใน GitHub ไม่ตรงกับ `.env`, ไม่มี delivery เลย = Webhook URL ผิดหรือ GitHub เข้า panel ไม่ถึง (ตรวจ port และ firewall) ถ้าได้ `202` ให้ดู Admin → GitHub ช่อง Last webhook: `202 queued: 0` แปลว่าไม่มี service ที่ repo (`owner/name`) กับ branch ตรงกับ push นั้น ตรวจ repo และ branch ในหน้าตั้งค่าของ service (branch ต้องตรงทุกตัวอักษร) |
 | หน้าของ panel (เช่น Admin → GitHub) หรือการกดปุ่มล้มเหลว และ `sudo docker compose logs web` มี `invalid web configuration … GITHUB_WEBHOOK_SECRET must be at least 16 characters` | `GITHUB_WEBHOOK_SECRET` ใน `.env` สั้นกว่า 16 ตัวอักษร สร้างใหม่ด้วย `openssl rand -hex 32` ตั้งให้ตรงกันใน GitHub App และ `.env` แล้ว `sudo docker compose up -d` |
 | ดู container ของแอปที่ระบบจัดการ | `sudo docker ps --filter label=vpsm.managed=true` |
 | ดูเพดาน memory ของ builder | `sudo docker inspect buildx_buildkit_vpsm-builder0 --format '{{.HostConfig.Memory}}'` ต้องได้ `3221225472` (3 GB; container ของ BuildKit เริ่มตอน build ครั้งแรก จึงตรวจได้หลัง deploy ครั้งแรกเท่านั้น) |
@@ -223,7 +224,7 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
 
 ถ้าใช้โหมด port อื่น (หัวข้อท้ายคู่มือ) ให้ใส่ `:8443` ท้ายทุก URL ที่ใช้ `curl` ในรายการนี้
 
-1. **ติดตั้ง:** `sudo docker compose ps` แสดง postgres (healthy), traefik เป็น running, worker และ web เป็น healthy และ `sudo docker compose logs worker` ไม่มี error
+1. **ติดตั้ง:** `sudo docker compose ps` แสดง postgres (healthy), traefik เป็น running, worker และ web เป็น healthy และ `sudo docker compose logs worker` ไม่มี error (บนระบบที่ยังไม่ตั้ง GitHub App `GITHUB_APP_PRIVATE_KEY_PATH` ว่าง และ compose mount `/dev/null` แทนไฟล์ key: worker ต้องยัง healthy)
 2. **deploy แอปตัวอย่าง:** ทำตามหัวข้อ 6 แล้ว `status demo` ต้องเป็น `SUCCESS`, `curl` ต้องได้ `hello from vpsm` ผ่าน HTTPS และ memory ของ builder ต้องเป็น `3221225472`
 3. **deploy แบบไม่ล่ม:** เปิด terminal ที่ 1 ยิงต่อเนื่อง
    ```bash
@@ -235,7 +236,12 @@ sudo docker compose exec -T postgres pg_dump -U postgres postgres > vpsm-backup.
    sudo docker compose kill worker && sudo docker compose up -d worker
    ```
    deployment นั้นต้องเป็น `FAILED` (`worker restarted during deployment`), เว็บยังตอบ `200` และ `sudo docker ps --filter label=vpsm.managed=true` เหลือ container ของ hello เพียงตัวเดียว ขั้นนี้ต้องใช้ `kill` ไม่ใช่ `restart` หรือ `stop` เพราะสองคำสั่งนั้นส่ง SIGTERM และ worker จะรอให้ deployment ที่กำลังทำอยู่ทำเสร็จก่อนได้นานสุด 50 วินาที deploy สั้นๆ จึงจบเป็น `SUCCESS` ได้ตามปกติ ซึ่งไม่ได้แปลว่าการกู้งานค้างเสีย
-5. **GitHub App และ push-to-deploy** (ทำหลังตั้งค่าตามหัวข้อ "GitHub App"): หน้า Admin → GitHub แสดง Status เป็น OK, จำนวน repo ที่อ่านได้ และบอกว่า `GITHUB_WEBHOOK_SECRET` ถูกตั้งแล้ว จากนั้น push commit ขึ้น branch ที่ผูกกับ service → เวอร์ชันใหม่ (deployment ที่ trigger มาจาก push) ขึ้นภายใน ~5 นาที โดยไม่ต้อง SSH และไม่ต้องกด deploy เอง ช่อง Last webhook ในหน้า Admin → GitHub ต้องเป็น `push` และผล `202 queued: 1` (ถ้า repo เป็น private นี่คือการยืนยันว่า clone ด้วย App ได้โดยไม่ใช้ personal token)
+5. **GitHub App และ push-to-deploy** (ทำหลังตั้งค่าตามหัวข้อ "GitHub App"): หลัง `sudo docker compose up -d` worker ต้องเป็น healthy โดยมี key ถูก mount อยู่ (`sudo docker compose exec worker test -s /run/secrets/github-app.pem && echo mounted` ต้องพิมพ์ `mounted` คำสั่งนี้ไม่แสดงเนื้อ key) หน้า Admin → GitHub แสดง Status เป็น OK, จำนวน repo ที่อ่านได้ และบอกว่า `GITHUB_WEBHOOK_SECRET` ถูกตั้งแล้ว จากนั้น push commit ขึ้น branch ที่ผูกกับ service ของ repo ที่เป็น **private** → เวอร์ชันใหม่ (deployment ที่ trigger มาจาก push) ขึ้นเป็น `SUCCESS` ภายใน ~5 นาที โดยไม่ต้อง SSH และไม่ต้องกด deploy เอง ช่อง Last webhook ในหน้า Admin → GitHub ต้องเป็น `push` และผล `202 queued: 1` (เป็นการยืนยันว่า clone repo private ด้วย App ได้โดยไม่ใช้ personal token)
+6. **webhook ที่ใหญ่เกิน:** ส่ง body 30 MB แบบ chunked (ไม่มี Content-Length) ไปที่ webhook (ทำหลังตั้ง `GITHUB_WEBHOOK_SECRET` แล้ว) ต้องได้ `413` ไม่ใช่ connection ถูกตัด:
+   ```bash
+   head -c 30000000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}\n' -X POST -T - -H 'Expect:' -H 'Content-Type: application/json' https://<PANEL_DOMAIN>/api/github/webhook
+   ```
+   (`-T -` ส่ง stdin แบบ stream โดยไม่บอกขนาดล่วงหน้า ถ้าได้ `503` แปลว่ายังไม่ได้ตั้ง `GITHUB_WEBHOOK_SECRET`)
 
 ## Dashboard
 
@@ -340,7 +346,7 @@ panel เปิดสู่อินเทอร์เน็ตและรั�
 
 ### Private key
 
-ในหน้าตั้งค่าของ App หา Private keys (อยู่ในเมนู Credentials หรือหน้า General ตามหน้าตาของ GitHub ตอนนั้น) → **Generate a private key** GitHub จะดาวน์โหลดไฟล์ `.pem` มาที่เครื่องของคุณ ให้ย้ายไปเก็บบน VPS นอกโฟลเดอร์ของ repo ตัวอย่างนี้ใช้ `/var/opt/vps-engine/secrets/github-app.pem` (โฟลเดอร์ `700`, ไฟล์ `600`, เจ้าของ root)
+ในหน้าตั้งค่าของ App ไปที่เมนู **Credentials** → Private keys → **Generate a private key** GitHub จะดาวน์โหลดไฟล์ `.pem` มาที่เครื่องของคุณ ให้ย้ายไปเก็บบน VPS นอกโฟลเดอร์ของ repo ตัวอย่างนี้ใช้ `/var/opt/vps-engine/secrets/github-app.pem` (โฟลเดอร์ `700`, ไฟล์ `600`, เจ้าของ root)
 
 1. **บน Mac** คัดลอกเนื้อไฟล์เข้า clipboard โดยไม่ต้องเปิดไฟล์ในโปรแกรมใดๆ:
 
@@ -355,29 +361,38 @@ panel เปิดสู่อินเทอร์เน็ตและรั�
    sudo bash -c 'umask 077; cat > /var/opt/vps-engine/secrets/github-app.pem'
    ```
 
-3. **บน Mac** ล้าง clipboard แล้วลบไฟล์ `.pem` ที่ดาวน์โหลดไว้ออกจากเครื่อง (key ที่ต้องใช้มีอยู่บน VPS แล้ว ถ้าต้องการอันใหม่ให้ generate ใหม่):
+3. **บน Mac** ล้าง clipboard ทันทีหลังวาง:
 
    ```bash
    pbcopy < /dev/null
-   rm ~/Downloads/<ชื่อไฟล์ที่ GitHub ให้>.pem
    ```
 
-4. **บน VPS** ตรวจสิทธิ์ของไฟล์ (ต้องเป็น `-rw-------` เจ้าของ root) และตรวจว่าเป็น key เดียวกับที่ GitHub ออกให้ด้วย fingerprint ผลที่ได้ต้องตรงกับ fingerprint ใต้ key นั้นในหน้า App (ตัดคำนำหน้า `SHA256:` ออก):
+   คำสั่งนี้ล้างแค่ clipboard ของระบบ ไม่ล้างประวัติใน clipboard manager (เช่น Raycast, Alfred, Maccy, Paste) และไม่ล้างสิ่งที่ Universal Clipboard ส่งไปให้อุปกรณ์ Apple เครื่องอื่นแล้ว ถ้าใช้อยู่ให้ลบรายการนั้นในประวัติด้วย หรือดีกว่านั้นคือหยุดโปรแกรมเหล่านั้น (และปิด Handoff) ก่อนขั้นที่ 1
+
+4. **บน VPS** ตรวจสิทธิ์ของไฟล์ (ต้องเป็น `-rw-------` เจ้าของ root) และตรวจว่าเป็น key เดียวกับที่ GitHub ออกให้ด้วย fingerprint ผลที่ได้ต้องตรงกับ fingerprint ใต้ key นั้นในเมนู Credentials ของ App (ตัดคำนำหน้า `SHA256:` ออก):
 
    ```bash
    sudo ls -l /var/opt/vps-engine/secrets/github-app.pem
    sudo openssl rsa -in /var/opt/vps-engine/secrets/github-app.pem -pubout -outform DER | openssl sha256 -binary | openssl base64
    ```
 
+   ถ้าไม่ตรง (เช่น วางไม่ครบ) ให้ทำขั้นที่ 1–4 ใหม่ ไฟล์บน Mac ยังอยู่
+
+5. **บน Mac** เมื่อขั้นที่ 4 ผ่านแล้วเท่านั้น จึงลบไฟล์ `.pem` ที่ดาวน์โหลดไว้ออกจากเครื่อง (key ที่ต้องใช้มีอยู่บน VPS แล้ว ถ้าต้องการอันใหม่ให้ generate ใหม่):
+
+   ```bash
+   rm ~/Downloads/<ชื่อไฟล์ที่ GitHub ให้>.pem
+   ```
+
 ข้อควรระวังกับ key:
 
 - **ห้ามเปิด เลือก หรือแปะ key ใน editor หรือ terminal ของโปรแกรมที่มี AI assistant ต่ออยู่** (เช่น IDE ที่มี extension AI) เพราะเนื้อหาที่เปิดหรือเลือกอาจถูกส่งออกไปเป็น context ใช้ `pbcopy` กับ `cat >` อย่างข้างบนแทน
 - ห้ามแปะ key ในแชท ticket หรือ issue ห้าม commit และห้ามใส่ใน `.env`
-- **ถ้า key เคยถูกเปิดเผย** (เปิดใน editor ที่มี AI, แปะผิดที่, ไฟล์หลุด) ให้ถือว่าใช้ไม่ได้อีก: ทำตามหัวข้อ "เปลี่ยน key" ทันที (สร้างอันใหม่ → เขียนทับไฟล์ → `sudo docker compose restart worker` → ลบอันเก่าใน GitHub)
+- **ถ้า key เคยถูกเปิดเผย** (เปิดใน editor ที่มี AI, แปะผิดที่, ไฟล์หลุด) ให้ถือว่าใช้ไม่ได้อีก: ทำตามหัวข้อ "เปลี่ยน key" ทันที (สร้างอันใหม่ → สำรองไฟล์เดิม → เขียนทับไฟล์ → ตรวจไฟล์ใหม่ → `sudo docker compose restart worker` → ลบไฟล์สำรองและอันเก่าใน GitHub)
 
 ### ใส่ค่าใน `.env`
 
-เพิ่มสามตัวแปรนี้ใน `.env` (มีตัวอย่างใน `.env.example`) โดยไฟล์ key ต้องอยู่ที่ path นั้นแล้วก่อนสั่ง `up -d` (ถ้าไม่มีไฟล์ Docker จะสร้างเป็นโฟลเดอร์แทน):
+เพิ่มสามตัวแปรนี้ใน `.env` (มีตัวอย่างใน `.env.example`) `GITHUB_APP_PRIVATE_KEY_PATH` ต้องเป็น path แบบเต็ม (absolute ขึ้นต้นด้วย `/`) บนเครื่อง VPS ไม่ใช่ path ใน container และไม่ใช่ path สัมพัทธ์ (Docker Compose ตีความ path สัมพัทธ์เทียบกับโฟลเดอร์ของ repo หรือเป็นชื่อ volume) โดยไฟล์ key ต้องอยู่ที่ path นั้นแล้วก่อนสั่ง `up -d` (ถ้าไม่มีไฟล์ Docker จะสร้างเป็นโฟลเดอร์แทน):
 
 ```bash
 GITHUB_APP_ID=<App ID ตัวเลข>
@@ -396,7 +411,7 @@ curl -4 ifconfig.me
 curl -6 ifconfig.me
 ```
 
-(ถ้า `curl -6` ไม่ตอบ แปลว่าเครื่องไม่มี IPv6 ขาออก ไม่ต้องเพิ่ม) ในทางกลับกัน ถ้า firewall ของผู้ให้บริการ VPS จำกัดว่าใครเข้า port ของ panel ได้ ต้องอนุญาต IP ที่ GitHub ใช้ส่ง webhook (ช่วง `hooks` ที่ `https://api.github.com/meta`) ด้วย
+(ถ้า `curl -6` ไม่ตอบ แปลว่าเครื่องไม่มี IPv6 ขาออก ไม่ต้องเพิ่ม) นอกจาก allow list ของ org แล้ว App ที่ org เป็นเจ้าของยังมี IP allow list ของตัวเองในหน้าตั้งค่าของ App ด้วย ถ้าเปิดไว้ให้เพิ่ม IP ชุดเดียวกันที่นั่นด้วย ในทางกลับกัน ถ้า firewall ของผู้ให้บริการ VPS จำกัดว่าใครเข้า port ของ panel ได้ ต้องอนุญาต IP ที่ GitHub ใช้ส่ง webhook (ช่วง `hooks` ที่ `https://api.github.com/meta`) ด้วย
 
 ### ตรวจว่าใช้ได้
 
@@ -409,21 +424,46 @@ curl -6 ifconfig.me
 
 ทำเมื่อต้องการหมุน key หรือเมื่อ key เคยถูกเปิดเผย:
 
-1. ที่หน้า App ใน GitHub → Private keys → **Generate a private key** (ยังไม่ลบอันเก่า) ย้ายไฟล์ใหม่ขึ้น VPS ด้วย `pbcopy` และ `cat >` เหมือนหัวข้อ "Private key" โดย **เขียนทับไฟล์เดิม** ที่ path เดิม (`cat >` ใส่เนื้อใหม่ในไฟล์เดียวกัน):
+1. ที่หน้า App ใน GitHub → **Credentials** → Private keys → **Generate a private key** (ยังไม่ลบอันเก่า)
+
+2. **บน VPS** สำรองไฟล์เดิมไว้ก่อน (`cp -p` คงสิทธิ์ `600` และเจ้าของ root ไว้) แล้วตรวจว่าไฟล์สำรองเป็น `-rw-------`:
+
+   ```bash
+   sudo cp -p /var/opt/vps-engine/secrets/github-app.pem /var/opt/vps-engine/secrets/github-app.pem.old
+   sudo chmod 600 /var/opt/vps-engine/secrets/github-app.pem.old
+   sudo ls -l /var/opt/vps-engine/secrets/
+   ```
+
+3. ย้ายไฟล์ใหม่ขึ้น VPS ด้วย `pbcopy` และ `cat >` เหมือนหัวข้อ "Private key" (รวมถึงการล้าง clipboard ทันทีหลังวาง) โดย **เขียนทับไฟล์เดิม** ที่ path เดิม (`cat >` ใส่เนื้อใหม่ในไฟล์เดียวกัน):
 
    ```bash
    sudo bash -c 'umask 077; cat > /var/opt/vps-engine/secrets/github-app.pem'
    ```
 
-2. สั่งให้ worker อ่าน key ใหม่ (worker อ่านไฟล์ตอนเริ่มทำงานเท่านั้น):
+4. **ตรวจไฟล์ใหม่ก่อน restart:** สิทธิ์ต้องเป็น `-rw-------` เจ้าของ root และ fingerprint ต้องตรงกับ fingerprint ของ key **ใหม่** ในเมนู Credentials ของ App (คำสั่งเดียวกับขั้นที่ 4 ของหัวข้อ "Private key"):
+
+   ```bash
+   sudo ls -l /var/opt/vps-engine/secrets/github-app.pem
+   sudo openssl rsa -in /var/opt/vps-engine/secrets/github-app.pem -pubout -outform DER | openssl sha256 -binary | openssl base64
+   ```
+
+   ถ้าไม่ตรง ให้ทำขั้นที่ 3 ใหม่ (worker ยังใช้ key เดิมที่อ่านไว้ตอนเริ่ม จึงยังไม่มีอะไรเสีย) เมื่อตรงแล้วจึงลบไฟล์ `.pem` ที่ดาวน์โหลดไว้บน Mac
+
+5. เมื่อขั้นที่ 4 ผ่านแล้วเท่านั้น สั่งให้ worker อ่าน key ใหม่ (worker อ่านไฟล์ตอนเริ่มทำงานเท่านั้น):
 
    ```bash
    sudo docker compose restart worker
    ```
 
-   ถ้าเปลี่ยนไฟล์ด้วยการแทนที่เป็นไฟล์ใหม่ (เช่น `mv` หรือ editor ที่บันทึกด้วยไฟล์ใหม่) container จะยังเห็นไฟล์เก่า ให้ใช้ `sudo docker compose up -d --force-recreate worker` แทน
+   ถ้าเปลี่ยนไฟล์ด้วยการแทนที่เป็นไฟล์ใหม่ (เช่น `mv` หรือ editor ที่บันทึกด้วยไฟล์ใหม่) container จะยังเห็นไฟล์เก่า ให้ใช้ `sudo docker compose up -d --force-recreate worker` แทน ถ้า worker ไม่ขึ้นหรือ Status เป็น Error ให้ใส่ไฟล์สำรองกลับ (`sudo cp -p /var/opt/vps-engine/secrets/github-app.pem.old /var/opt/vps-engine/secrets/github-app.pem`) แล้ว `sudo docker compose restart worker` อีกครั้ง
 
-3. ตรวจที่ Admin → GitHub (กด **Sync now**) ว่า Status ยังเป็น OK แล้ว**ลบ key เก่าใน GitHub** (Private keys → Delete) เมื่อยืนยันแล้วว่า key ใหม่ใช้ได้ ถ้า key เก่าเคยถูกเปิดเผยอย่าปล่อยค้างไว้
+6. ตรวจที่ Admin → GitHub (กด **Sync now**) ว่า Status เป็น OK แล้วจึงลบไฟล์สำรอง:
+
+   ```bash
+   sudo rm /var/opt/vps-engine/secrets/github-app.pem.old
+   ```
+
+7. จากนั้น**ลบ key เก่าใน GitHub** (Credentials → Private keys → Delete) ถ้า key เก่าเคยถูกเปิดเผยอย่าปล่อยค้างไว้
 
 ### เลิกใช้ personal token เดิม
 
