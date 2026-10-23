@@ -8,8 +8,12 @@ import { handleGithubWebhook, MAX_WEBHOOK_BYTES } from '@/server/github-webhook'
 // that nobody can make the server hold more than 25 MiB, configured or not. No answer is ever stored.
 const headers = { 'Cache-Control': 'no-store' }
 const reply = (status: number, body: unknown) => Response.json(body, { status, headers })
+// A refused body is left unread, so the connection is closed after the answer instead of being kept for the next request.
+const tooLarge = () => Response.json({ error: 'payload too large' }, { status: 413, headers: { ...headers, Connection: 'close' } })
 
-// The body as bytes, or null as soon as it is known to be over the limit (the rest is then not read).
+// The body as bytes, or null as soon as it is known to be over the limit (the rest is then not read). The stream is
+// released, never cancelled: in the server it is the incoming request itself, and cancelling it destroys the socket
+// the 413 is about to be sent on.
 async function readBody(request: Request): Promise<Uint8Array | null> {
   const chunks: Uint8Array[] = []
   let size = 0
@@ -20,7 +24,7 @@ async function readBody(request: Request): Promise<Uint8Array | null> {
       if (done) break
       size += value.byteLength
       if (size > MAX_WEBHOOK_BYTES) {
-        await reader.cancel()
+        reader.releaseLock()
         return null
       }
       chunks.push(value)
@@ -37,7 +41,6 @@ async function readBody(request: Request): Promise<Uint8Array | null> {
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    const tooLarge = () => reply(413, { error: 'payload too large' })
     if (Number(request.headers.get('content-length')) > MAX_WEBHOOK_BYTES) return tooLarge()
     const body = await readBody(request)
     if (!body) return tooLarge()

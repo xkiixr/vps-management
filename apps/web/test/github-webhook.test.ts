@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto'
+import { Readable } from 'node:stream'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
   createAppService,
@@ -453,6 +454,8 @@ describe('the route', () => {
     const response = await POST(request)
     expect(response.status).toBe(413)
     expect(response.headers.get('cache-control')).toBe('no-store')
+    // The body is left unread, so the connection must not be kept for the next request.
+    expect(response.headers.get('connection')).toBe('close')
     expect(await json(response)).toEqual({ error: 'payload too large' })
     expect(pulled()).toBe(0)
   })
@@ -462,8 +465,35 @@ describe('the route', () => {
     const response = await POST(request)
     expect(response.status).toBe(413)
     expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('connection')).toBe('close')
     expect(await json(response)).toEqual({ error: 'payload too large' })
     expect(pulled()).toBeLessThanOrEqual(27)
+  })
+
+  // In the server the body of the Request is the incoming Node stream itself. Cancelling it destroys that stream, and
+  // Node then destroys the socket of the unfinished request, so the 413 could never be sent. It has to be left alone.
+  test('a body that is a Node stream, as in the server, is not destroyed when it is refused, so the 413 reaches the client', async () => {
+    let pulled = 0
+    const chunk = Buffer.alloc(MIB)
+    const incoming = new Readable({
+      read() {
+        pulled += 1
+        this.push(chunk)
+      },
+    })
+    try {
+      const request = new Request(url, { method: 'POST', body: Readable.toWeb(incoming) as ReadableStream, duplex: 'half' } as RequestInit)
+      const response = await POST(request)
+      expect(incoming.destroyed).toBe(false)
+      expect(response.status).toBe(413)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(response.headers.get('connection')).toBe('close')
+      expect(await json(response)).toEqual({ error: 'payload too large' })
+      expect(incoming.destroyed).toBe(false)
+      expect(pulled).toBeLessThanOrEqual(40)
+    } finally {
+      incoming.destroy()
+    }
   })
 
   test('a body of exactly 25 MiB is read: it is answered by the signature check, not by the size check', async () => {

@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto'
+import { once } from 'node:events'
+import http from 'node:http'
 import { expect, type Page, type Response, test } from '@playwright/test'
-import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
+import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_PORT, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
 
 test.skip(process.env.E2E !== '1', 'set E2E=1 to run the browser smoke test (see playwright.config.ts)')
 // The tests share one server and one scratch database but not their data: each signs in on its own and works in a
@@ -97,6 +99,52 @@ test('sign in, create a project and a service, see it queued, sign out', async (
     await page.goto('/')
     await expect(page).toHaveURL('/login')
   })
+})
+
+// A body sent in chunks without a Content-Length that grows past the 25 MiB limit. The server has to answer 413. It
+// used to drop the connection instead: cancelling the incoming request body destroys its socket before the answer.
+test('a webhook body that grows past 25 MiB is answered 413, not a reset connection', async () => {
+  const MIB = 1024 * 1024
+  const answer = await new Promise<{ status: number; connection: string | undefined }>((resolve, reject) => {
+    const request = http.request({
+      host: '127.0.0.1',
+      port: E2E_PORT,
+      path: '/api/github/webhook',
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-github-event': 'push' },
+    })
+    const stop = new AbortController()
+    request.setTimeout(10_000, () => request.destroy(new Error('no answer within 10 s')))
+    request.on('error', reject)
+    request.on('response', (response) => {
+      response.resume()
+      stop.abort()
+      resolve({ status: response.statusCode ?? 0, connection: response.headers.connection })
+    })
+    // No end() until all is written, and no Content-Length: the request goes out as chunked.
+    void (async () => {
+      const chunk = Buffer.alloc(MIB, 0x20)
+      for (let sent = 0; sent < 40 && !request.destroyed; sent += 1) {
+        if (!request.write(chunk)) await once(request, 'drain', { signal: stop.signal })
+      }
+      request.end()
+    })().catch(() => {
+      // The server answered (stop) or the connection failed (the 'error' listener rejects).
+    })
+  })
+  expect(answer).toEqual({ status: 413, connection: 'close' })
+
+  // And the server is still serving the next, ordinary delivery.
+  const body = '{"zen":"Keep it logically awesome."}'
+  const ping = await fetch(`${E2E_ORIGIN}/api/github/webhook`, {
+    method: 'POST',
+    headers: {
+      'x-github-event': 'ping',
+      'x-hub-signature-256': 'sha256=' + createHmac('sha256', E2E_WEBHOOK_SECRET).update(body).digest('hex'),
+    },
+    body,
+  })
+  expect(ping.status).toBe(200)
 })
 
 // The panel is same-site with the team's apps, so one of them could frame it and have an admin click inside the
