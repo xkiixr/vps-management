@@ -53,7 +53,8 @@ export function SettingsForm({
           placeholder="owner/name"
           defaultValue={shown.repo}
           error={errors.repo}
-          hint="A GitHub repository, as owner/name."
+          list="github-repositories"
+          hint="A GitHub repository, as owner/name. Repositories the GitHub App can read are suggested."
         />
         <TextField
           name="branch"
@@ -62,7 +63,7 @@ export function SettingsForm({
           placeholder="main"
           defaultValue={shown.branch}
           error={errors.branch}
-          hint="Deploys use this branch. Automatic deploys on push come with the GitHub integration."
+          hint="Every push to this branch deploys the service when the GitHub App can read the repository."
         />
         <TextField
           name="rootDirectory"
@@ -117,7 +118,7 @@ export function SettingsForm({
             Save without deploying
           </Button>
           <p className="text-sm text-muted-foreground">
-            The running deployment is left as it is. The next deploy will include these settings.
+            The running deployment is left as it is. The next deploy, including one started by a push, will include these settings.
           </p>
         </div>
       </div>

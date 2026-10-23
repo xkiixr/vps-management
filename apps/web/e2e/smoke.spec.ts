@@ -2,7 +2,8 @@ import { createHmac } from 'node:crypto'
 import { once } from 'node:events'
 import http from 'node:http'
 import { expect, type Page, type Response, test } from '@playwright/test'
-import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_PORT, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
+import { createDb, replaceGithubRepositories, setGithubStatus } from '@vpsm/db'
+import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, DATABASE_URL_VAR, E2E_ORIGIN, E2E_PORT, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
 
 test.skip(process.env.E2E !== '1', 'set E2E=1 to run the browser smoke test (see playwright.config.ts)')
 // The tests share one server and one scratch database but not their data: each signs in on its own and works in a
@@ -91,6 +92,68 @@ test('sign in, create a project and a service, see it queued, sign out', async (
     // It replaced the first deployment, which was still waiting.
     await expect(rows.filter({ has: page.locator('[data-status="QUEUED"]') })).toHaveCount(1)
     await expect(rows.filter({ has: page.locator('[data-status="SKIPPED"]') })).toHaveCount(1)
+  })
+
+  // Nothing in this test reports an App (no worker runs), so the service page says pushes do not deploy.
+  await test.step('the service page says that pushes do not deploy while there is no GitHub App', async () => {
+    await expect(page.getByText('The GitHub App is not set up: pushes do not deploy this service.')).toBeVisible()
+  })
+
+  await test.step('the GitHub admin page shows the webhook, the missing App and the last delivery, and Sync now answers', async () => {
+    await page.goto('/admin/users')
+    await page.getByRole('navigation', { name: 'Administration' }).getByRole('link', { name: 'GitHub' }).click()
+    await expect(page).toHaveURL('/admin/github')
+    await expect(page.getByRole('heading', { name: 'GitHub', exact: true })).toBeVisible()
+    await expect(page.getByText(`${E2E_ORIGIN}/api/github/webhook`)).toBeVisible()
+    await expect(page.getByText('GITHUB_WEBHOOK_SECRET is set.')).toBeVisible()
+    await expect(page.getByText('Not set up: the worker has no GITHUB_APP_ID.')).toBeVisible()
+    await expect(page.getByText('Delivery smoke-delivery')).toBeVisible()
+    await expect(page.getByText('202 queued: 1')).toBeVisible()
+    await expect(page.getByText('The GitHub App cannot read any repository yet.')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Sync now' }).click()
+    await expect(page.getByText('Sync requested. The list updates within a minute.')).toBeVisible()
+  })
+
+  // What the worker writes once a GitHub App works, written here by the test: the repositories it can read and its status.
+  await test.step('once the App can read the repository, the pages suggest repositories and say that pushes deploy', async () => {
+    const { db, close } = createDb(process.env[DATABASE_URL_VAR]!)
+    try {
+      await replaceGithubRepositories(db, [
+        { id: 1, fullName: 'Acme/Web', defaultBranch: 'trunk', private: true, installationId: 5 },
+        { id: 2, fullName: 'acme/api', defaultBranch: 'main', private: false, installationId: 5 },
+      ])
+      await setGithubStatus(db, {
+        ok: true,
+        checkedAt: new Date().toISOString(),
+        appSlug: 'vpsm-smoke',
+        installations: [{ account: 'acme', repositories: 2 }],
+      })
+    } finally {
+      await close()
+    }
+    const suggestions = page.locator('datalist#github-repositories option')
+
+    // The service is from acme/web, which the App knows as Acme/Web: the match ignores letter case.
+    await page.goto('/projects/smoke/services/web')
+    await expect(page.getByText('Every push to main deploys this service.')).toBeVisible()
+    await expect(page.getByText('The GitHub App is not set up')).toHaveCount(0)
+    await page.getByRole('tab', { name: 'Settings' }).click()
+    await expect(page.getByLabel('Repository')).toHaveAttribute('list', 'github-repositories')
+    await expect(suggestions).toHaveCount(2)
+    await expect(suggestions.first()).toHaveAttribute('value', 'acme/api')
+
+    await page.goto('/projects/smoke')
+    await expect(page.getByLabel('Repository')).toHaveAttribute('list', 'github-repositories')
+    await expect(suggestions).toHaveCount(2)
+
+    await page.goto('/admin/github')
+    await expect(page.getByText('vpsm-smoke')).toBeVisible()
+    await expect(page.getByText('acme (2 repositories)')).toBeVisible()
+    const repositories = page.getByRole('table').getByRole('row')
+    await expect(repositories.filter({ hasText: 'Acme/Web' })).toContainText('trunk')
+    await expect(repositories.filter({ hasText: 'Acme/Web' })).toContainText('Private')
+    await expect(repositories.filter({ hasText: 'acme/api' })).toContainText('Public')
   })
 
   await test.step('sign out, after which the dashboard asks for the sign-in again', async () => {

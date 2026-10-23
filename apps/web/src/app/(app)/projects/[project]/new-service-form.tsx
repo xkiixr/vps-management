@@ -38,7 +38,8 @@ export function NewServiceForm({ maxMemoryMb, action }: { maxMemoryMb: number; a
           placeholder="owner/name"
           defaultValue={typed.repo ?? ''}
           error={errors.repo}
-          hint="A GitHub repository, as owner/name."
+          list="github-repositories"
+          hint="A GitHub repository, as owner/name. Repositories the GitHub App can read are suggested."
         />
         <TextField
           name="branch"
@@ -46,7 +47,7 @@ export function NewServiceForm({ maxMemoryMb, action }: { maxMemoryMb: number; a
           placeholder="main"
           defaultValue={typed.branch ?? ''}
           error={errors.branch}
-          hint="Empty means main. Deploys use this branch. Automatic deploys on push come with the GitHub integration."
+          hint="Empty means main. Every push to this branch deploys the service when the GitHub App can read the repository."
         />
         <TextField
           name="rootDirectory"

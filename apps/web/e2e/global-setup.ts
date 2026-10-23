@@ -4,7 +4,7 @@ import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createUser, generatePassword } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
-import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_PORT, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
+import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, DATABASE_URL_VAR, E2E_ORIGIN, E2E_PORT, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
 
 const webDir = path.resolve(import.meta.dirname, '..')
 const SERVER_START_TIMEOUT_MS = 60_000
@@ -82,6 +82,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     await createUser(testDb.db, { email: ADMIN_EMAIL, name: 'Smoke Admin', role: 'admin', password: adminPassword })
     await createUser(testDb.db, { email: TEAMMATE_EMAIL, name: 'Smoke Teammate', role: 'member', password: generatePassword() })
     process.env[ADMIN_PASSWORD_VAR] = adminPassword
+    process.env[DATABASE_URL_VAR] = testDb.url
 
     await run('corepack', ['pnpm', 'run', 'build'], webDir)
 

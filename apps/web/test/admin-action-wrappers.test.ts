@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
-import { authenticate, createUser, getResourceSettings, setUserDisabled, type SafeUser } from '@vpsm/db'
+import { authenticate, createUser, getResourceSettings, GITHUB_SYNC_CHANNEL, setUserDisabled, type SafeUser } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
 import type { SessionCookieOptions } from '@/server/session'
 
@@ -36,6 +36,7 @@ vi.mock('@/server/session', async (importOriginal) => ({
 
 import {
   createUserAction,
+  requestGithubSyncAction,
   resetPasswordAction,
   saveResourceSettingsAction,
   setDisabledAction,
@@ -96,6 +97,7 @@ const attempts: [string, () => Promise<unknown>][] = [
     'saveResourceSettingsAction',
     () => saveResourceSettingsAction(NO_STATE, form({ memoryBudgetMb: '4096', maxServiceMemoryMb: '1024' })),
   ],
+  ['requestGithubSyncAction', () => requestGithubSyncAction(NO_STATE, form({}))],
 ]
 
 async function expectNothingChanged() {
@@ -360,5 +362,34 @@ describe('saveResourceSettingsAction', () => {
       await t.sql`alter table settings_away rename to settings`
     }
     expect(log).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('requestGithubSyncAction', () => {
+  test('asks the worker for a sync, says so and records github.sync', async () => {
+    const heard: string[] = []
+    const subscription = await t.sql.listen(GITHUB_SYNC_CHANNEL, (payload) => void heard.push(payload))
+    try {
+      expect(await requestGithubSyncAction(NO_STATE, form({}))).toEqual({ notice: 'Sync requested. The list updates within a minute.' })
+      await vi.waitFor(() => expect(heard).toEqual(['']))
+    } finally {
+      await subscription.unlisten()
+    }
+    expect(await auditActions()).toEqual(['github.sync'])
+  })
+
+  test('an unexpected failure is the generic message, logged, and nothing is recorded', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mocks.db = new Proxy(t.db, {
+      get: (target, property, receiver) =>
+        property === 'execute' ? () => Promise.reject(new Error('connection lost')) : Reflect.get(target, property, receiver),
+    })
+    try {
+      expect(await requestGithubSyncAction(NO_STATE, form({}))).toEqual({ error: GENERIC_ERROR })
+    } finally {
+      mocks.db = t.db
+    }
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(await auditActions()).toEqual([])
   })
 })

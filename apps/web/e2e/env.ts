@@ -6,6 +6,8 @@ export const E2E_ORIGIN = `http://localhost:${E2E_PORT}`
 export const ADMIN_EMAIL = 'admin@example.com'
 export const TEAMMATE_EMAIL = 'teammate@example.com'
 export const ADMIN_PASSWORD_VAR = 'E2E_ADMIN_PASSWORD'
+/** Also set by global-setup: the scratch database, for a test to write what the worker would (the GitHub App's state). */
+export const DATABASE_URL_VAR = 'E2E_DATABASE_URL'
 
 /** The secret the dashboard under test verifies GitHub webhooks with (GITHUB_WEBHOOK_SECRET); a made-up value. */
 export const E2E_WEBHOOK_SECRET = 'e2e-webhook-secret-0123456789'

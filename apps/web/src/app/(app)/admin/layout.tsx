@@ -15,6 +15,9 @@ export default async function AdminLayout({ children }: { children: ReactNode })
         <Link href="/admin/settings" className="text-muted-foreground hover:text-foreground">
           Resource settings
         </Link>
+        <Link href="/admin/github" className="text-muted-foreground hover:text-foreground">
+          GitHub
+        </Link>
       </nav>
       {children}
     </div>

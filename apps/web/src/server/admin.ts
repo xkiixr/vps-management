@@ -40,7 +40,7 @@ export const SETTINGS_FIELDS = ['memoryBudgetMb', 'maxServiceMemoryMb'] as const
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 // Defence in depth behind beginAdminAction(): the same 404 a member gets everywhere else.
-function assertAdmin(actor: Actor): void {
+export function assertAdmin(actor: Actor): void {
   if (actor.role !== 'admin') throw new NotFoundError()
 }
 

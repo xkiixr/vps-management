@@ -15,6 +15,7 @@ import {
 } from '../admin'
 import { actionError } from '../errors'
 import { formTexts } from '../form'
+import { doRequestGithubSync } from '../github'
 import { beginAdminAction } from '../guards'
 import { clearSessionCookie } from '../session'
 
@@ -114,4 +115,15 @@ export async function saveResourceSettingsAction(_previous: ActionState, formDat
   if (result.error || result.fieldErrors) return { ...result, values: typed }
   revalidatePath(SETTINGS_PATH)
   return result
+}
+
+// Nothing is bound to this action and the form has no fields: the worker reads the repositories again and the
+// page shows the new list on a later visit (it is read fresh on every request), so there is nothing to refresh.
+export async function requestGithubSyncAction(_previous: ActionState, _formData: FormData): Promise<ActionState> {
+  const { db, actor } = await beginAdminAction()
+  try {
+    return await doRequestGithubSync(db, actor)
+  } catch (error) {
+    return actionError(error, 'requesting github sync')
+  }
 }

@@ -1,7 +1,8 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { findProjectFor, listMembers, listServices } from '@vpsm/db'
+import { findProjectFor, listGithubRepositories, listMembers, listServices } from '@vpsm/db'
+import { RepoDatalist } from '@/components/repo-datalist'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -30,10 +31,11 @@ export default async function ProjectPage({ params }: Props) {
   // A project that does not exist and one the user may not see are the same 404.
   const project = await findProjectFor(db, { id: user.id, role: user.role }, projectName)
   if (!project) notFound()
-  const [members, services, maxMemoryMb] = await Promise.all([
+  const [members, services, maxMemoryMb, repositories] = await Promise.all([
     listMembers(db, project.id),
     listServices(db, project.id, { httpsPort: webConfig().httpsPort }),
     maxServiceMemoryMb(db),
+    listGithubRepositories(db),
   ])
 
   return (
@@ -108,6 +110,7 @@ export default async function ProjectPage({ params }: Props) {
         </CardHeader>
         <CardContent>
           <NewServiceForm maxMemoryMb={maxMemoryMb} action={createServiceAction.bind(null, project.name)} />
+          <RepoDatalist id="github-repositories" repositories={repositories} />
         </CardContent>
       </Card>
 

@@ -1,7 +1,16 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { configChangedSinceLiveDeploy, findProjectFor, findService, listDeployments } from '@vpsm/db'
+import {
+  configChangedSinceLiveDeploy,
+  findGithubRepository,
+  findProjectFor,
+  findService,
+  getGithubStatus,
+  listDeployments,
+  listGithubRepositories,
+} from '@vpsm/db'
+import { RepoDatalist } from '@/components/repo-datalist'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -11,6 +20,7 @@ import { deployAction, restartAction } from '@/server/actions/deployments'
 import { deleteServiceAction, saveServiceSettingsAction } from '@/server/actions/services'
 import { webConfig } from '@/server/config'
 import { getDb } from '@/server/db'
+import { pushDeployNote } from '@/server/github'
 import { requireUser } from '@/server/guards'
 import { maxServiceMemoryMb } from '@/server/limits'
 import { DeleteServiceForm } from './delete-service-form'
@@ -39,12 +49,16 @@ export default async function ServicePage({ params }: Props) {
   if (!project) notFound()
   const row = await findService(db, project.id, serviceName, { httpsPort })
   if (!row) notFound()
-  const [maxMemoryMb, deployments] = await Promise.all([
+  const [maxMemoryMb, deployments, githubStatus, repositories, repository] = await Promise.all([
     maxServiceMemoryMb(db),
     listDeployments(db, row.instance.id, DEPLOYMENTS_SHOWN),
+    getGithubStatus(db),
+    listGithubRepositories(db),
+    row.instance.source ? findGithubRepository(db, row.instance.source.repo) : null,
   ])
 
   const { service, instance, url, latest } = row
+  const pushNote = pushDeployNote({ source: instance.source, status: githubStatus, repository })
   // Only these settings go to the browser, as text for the form.
   const settings: ServiceSettings = {
     repo: instance.source?.repo ?? '',
@@ -80,6 +94,15 @@ export default async function ServicePage({ params }: Props) {
           <span>{latest ? `Last deploy ${formatDateTime(latest.createdAt)}` : 'Not deployed yet'}</span>
         </p>
       </div>
+
+      {pushNote &&
+        (pushNote.tone === 'warning' ? (
+          <Alert>
+            <AlertDescription>{pushNote.text}</AlertDescription>
+          </Alert>
+        ) : (
+          <p className="text-sm text-muted-foreground">{pushNote.text}</p>
+        ))}
 
       {configChangedSinceLiveDeploy(row) && (
         <Alert>
@@ -133,6 +156,7 @@ export default async function ServicePage({ params }: Props) {
                 maxMemoryMb={maxMemoryMb}
                 action={saveServiceSettingsAction.bind(null, project.name, service.name)}
               />
+              <RepoDatalist id="github-repositories" repositories={repositories} />
             </CardContent>
           </Card>
         </TabsContent>
