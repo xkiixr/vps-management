@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { findProjectFor, listGithubRepositories, listMembers, listServices } from '@vpsm/db'
+import { findProjectFor, getGithubStatus, listGithubRepositories, listMembers, listServices } from '@vpsm/db'
 import { RepoDatalist } from '@/components/repo-datalist'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
@@ -12,6 +12,7 @@ import { deleteProjectAction } from '@/server/actions/projects'
 import { createServiceAction } from '@/server/actions/services'
 import { webConfig } from '@/server/config'
 import { getDb } from '@/server/db'
+import { githubInstallUrl } from '@/server/github'
 import { requireUser } from '@/server/guards'
 import { maxServiceMemoryMb } from '@/server/limits'
 import { DeleteProjectForm } from './delete-project-form'
@@ -31,12 +32,14 @@ export default async function ProjectPage({ params }: Props) {
   // A project that does not exist and one the user may not see are the same 404.
   const project = await findProjectFor(db, { id: user.id, role: user.role }, projectName)
   if (!project) notFound()
-  const [members, services, maxMemoryMb, repositories] = await Promise.all([
+  const [members, services, maxMemoryMb, repositories, githubStatus] = await Promise.all([
     listMembers(db, project.id),
     listServices(db, project.id, { httpsPort: webConfig().httpsPort }),
     maxServiceMemoryMb(db),
     listGithubRepositories(db),
+    getGithubStatus(db),
   ])
+  const installUrl = githubInstallUrl(githubStatus)
 
   return (
     <div className="grid gap-8">
@@ -111,6 +114,15 @@ export default async function ProjectPage({ params }: Props) {
         <CardContent>
           <NewServiceForm maxMemoryMb={maxMemoryMb} action={createServiceAction.bind(null, project.name)} />
           <RepoDatalist id="github-repositories" repositories={repositories} />
+          {/* GitHub decides who may install the App on an organization; anyone else can only request it there. */}
+          {installUrl && (
+            <p className="mt-4 text-sm text-muted-foreground">
+              Repository not in the suggestions?{' '}
+              <a href={installUrl} target="_blank" rel="noopener noreferrer" className="font-medium text-foreground underline">
+                Connect it on GitHub
+              </a>
+            </p>
+          )}
         </CardContent>
       </Card>
 

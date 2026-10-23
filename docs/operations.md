@@ -335,6 +335,7 @@ panel เปิดสู่อินเทอร์เน็ตและรั�
 - **Homepage URL:** `https://<PANEL_DOMAIN>[:<TRAEFIK_HTTPS_PORT>]`
 - **Webhook:** เลือก Active, **Webhook URL** เป็น `https://<PANEL_DOMAIN>[:<TRAEFIK_HTTPS_PORT>]/api/github/webhook`, **Secret** เป็นค่าสุ่มที่สร้างด้วย `openssl rand -hex 32` (จดไว้ ต้องใส่ค่าเดียวกันใน `.env` ที่ขั้นตอน "ใส่ค่าใน `.env`") และเลือก **Enable SSL verification**
 - **Repository permissions:** Contents = **Read-only** และ Metadata = **Read-only** ส่วน permission อื่นไม่ต้องให้ (ไม่ต้องใส่ Callback URL)
+- **Setup URL** (ในหัวข้อ Post installation): `https://<PANEL_DOMAIN>[:<TRAEFIK_HTTPS_PORT>]/admin/github` และติ๊ก **Redirect on update** หลังติดตั้ง App หรือเปลี่ยน repo เสร็จ GitHub จะพากลับมาที่หน้า Admin → GitHub ของ panel ซึ่งขึ้นข้อความว่ารายการ repo จะอัปเดตภายในหนึ่งนาที (ไม่ใส่ก็ได้ ระบบยังทำงานเหมือนเดิม แค่ GitHub ไม่พากลับมา)
 - **Subscribe to events:** ติ๊ก **Push** (event การติดตั้งและการเปลี่ยน repo ของ App GitHub ส่งให้เอง ถ้าไม่มา รายการ repo ก็ยังอัปเดตเองทุก 10 นาที)
 - **Where can this GitHub App be installed?** เลือก **Only on this account**
 
@@ -343,6 +344,8 @@ panel เปิดสู่อินเทอร์เน็ตและรั�
 ### ติดตั้ง App
 
 ที่หน้า App → **Install App** → เลือก org ของทีม → **Only select repositories** → เลือกเฉพาะ repo ที่จะ deploy (เพิ่มหรือลดทีหลังได้ที่ Settings ของ org → GitHub Apps → Installed GitHub Apps → Configure) repo ที่ไม่ได้เลือก worker จะ clone ได้ก็ต่อเมื่อเป็น public
+
+เมื่อระบบขึ้นแล้วและ worker อ่าน App ได้ (หน้า Admin → GitHub แสดงชื่อ App) ใช้ปุ่ม **Connect GitHub** ในหน้านั้นแทนการหาเมนูใน GitHub ได้ ปุ่มเปิดหน้าติดตั้ง App ของ GitHub ให้เลือก org และ repo ที่ App อ่านได้ (ถ้าติดตั้งแล้ว GitHub จะพาไปหน้าตั้งค่าของ installation นั้น) บันทึกแล้วรายการ repo ใน panel อัปเดตเองภายในหนึ่งนาที ส่วนหน้า project มีลิงก์ **Connect it on GitHub** ใต้ฟอร์มสร้าง service สำหรับ repo ที่ยังไม่อยู่ในรายการ GitHub เป็นคนตัดสินว่าใครติดตั้งได้: owner ของ org ติดตั้งหรือเพิ่ม repo ได้ทันที ส่วนสมาชิกคนอื่นได้แค่ส่งคำขอให้ owner อนุมัติใน GitHub
 
 ### Private key
 

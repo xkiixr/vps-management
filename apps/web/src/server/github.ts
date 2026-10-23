@@ -42,6 +42,20 @@ export function pushDeployNote(i: {
   return { tone: 'ok', text: `Every push to ${i.source.branch} deploys this service.` }
 }
 
+// GitHub's own form for App slugs: lowercase letters and digits in hyphen-separated words. Anything else is not put
+// into a link (the slug comes from GitHub through the worker, but it ends up in an href).
+const APP_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/**
+ * GitHub's page for installing the App (or, where it is installed, for choosing its repositories), or null while
+ * the worker has not read the App's slug yet. Saving there sends the App an installation event, which asks the
+ * worker for a sync, so the repository list follows within a minute.
+ */
+export function githubInstallUrl(status: GithubStatus | null): string | null {
+  const slug = status?.appSlug
+  return slug !== undefined && APP_SLUG.test(slug) ? `https://github.com/apps/${slug}/installations/new` : null
+}
+
 /** Asks the worker to read the repositories the App can see again, and records github.sync. */
 export async function doRequestGithubSync(db: Db, actor: Actor): Promise<ActionState> {
   assertAdmin(actor)

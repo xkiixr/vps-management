@@ -133,7 +133,9 @@ describe('syncGithub', () => {
     expect(Date.parse(status.checkedAt)).toBeLessThanOrEqual(Date.now())
   })
 
-  test('a failed sync records the error and keeps the previous list', async () => {
+  // The dashboard builds its "Connect GitHub" link from the slug, and a failed listing is exactly when an admin
+  // needs it (to install the App or give it repositories).
+  test('a failed sync records the error and keeps the previous list, and the slug when the app answered', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     await syncGithub(db, fakeClient().client, now)
     const failing = fakeClient()
@@ -146,6 +148,7 @@ describe('syncGithub', () => {
     const expected = {
       ok: false,
       checkedAt: '2026-10-23T10:10:00.000Z',
+      appSlug: 'vpsm-test',
       error: 'GitHub API GET /app/installations: 401 Bad credentials',
     }
     expect(status).toEqual(expected)

@@ -6,7 +6,7 @@ import { createUser, GITHUB_SYNC_CHANNEL, type GithubRepository, type GithubStat
 import { setupTestDb } from '@vpsm/db/testing'
 import { RepoDatalist } from '@/components/repo-datalist'
 import { NotFoundError } from '@/server/errors'
-import { doRequestGithubSync, pushDeployNote, SYNC_REQUESTED_NOTICE } from '@/server/github'
+import { doRequestGithubSync, githubInstallUrl, pushDeployNote, SYNC_REQUESTED_NOTICE } from '@/server/github'
 import { PASSWORD } from './helpers'
 
 const source: SourceConfig = { repo: 'acme/web', branch: 'release' }
@@ -66,6 +66,29 @@ describe('pushDeployNote', () => {
       tone: 'ok',
       text: 'Every push to release deploys this service.',
     })
+  })
+})
+
+describe('githubInstallUrl', () => {
+  test("is GitHub's page for installing the App, from the slug the worker stored", () => {
+    expect(githubInstallUrl(status)).toBe('https://github.com/apps/vpsm-deploy/installations/new')
+  })
+
+  test('is there while the App is failing, as long as its slug is known', () => {
+    expect(githubInstallUrl({ ok: false, checkedAt: status.checkedAt, appSlug: 'vpsm-deploy', error: 'x' })).toBe(
+      'https://github.com/apps/vpsm-deploy/installations/new',
+    )
+  })
+
+  test.each([
+    ['no status', null],
+    ['no slug', { ok: false, checkedAt: status.checkedAt, error: 'x' }],
+    ['a slug with a slash', { ...status, appSlug: 'evil/../x' }],
+    ['a slug with a query', { ...status, appSlug: 'x?y=1' }],
+    ['an uppercase slug', { ...status, appSlug: 'VPS-Engine' }],
+    ['an empty slug', { ...status, appSlug: '' }],
+  ])('is null for %s', (_label, input) => {
+    expect(githubInstallUrl(input as GithubStatus | null)).toBeNull()
   })
 })
 

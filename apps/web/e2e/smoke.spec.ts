@@ -110,6 +110,8 @@ test('sign in, create a project and a service, see it queued, sign out', async (
     await expect(page.getByText('Delivery smoke-delivery')).toBeVisible()
     await expect(page.getByText('202 queued: 1')).toBeVisible()
     await expect(page.getByText('The GitHub App cannot read any repository yet.')).toBeVisible()
+    // Without the App's slug there is nothing to link to.
+    await expect(page.getByRole('link', { name: 'Connect GitHub' })).toHaveCount(0)
 
     await page.getByRole('button', { name: 'Sync now' }).click()
     await expect(page.getByText('Sync requested. The list updates within a minute.')).toBeVisible()
@@ -146,14 +148,26 @@ test('sign in, create a project and a service, see it queued, sign out', async (
     await page.goto('/projects/smoke')
     await expect(page.getByLabel('Repository')).toHaveAttribute('list', 'github-repositories')
     await expect(suggestions).toHaveCount(2)
+    const connectRepository = page.getByRole('link', { name: 'Connect it on GitHub' })
+    await expect(connectRepository).toHaveAttribute('href', 'https://github.com/apps/vpsm-smoke/installations/new')
+    await expect(connectRepository).toHaveAttribute('target', '_blank')
 
     await page.goto('/admin/github')
+    await expect(page.getByRole('link', { name: 'Connect GitHub' })).toHaveAttribute(
+      'href',
+      'https://github.com/apps/vpsm-smoke/installations/new',
+    )
+    await expect(page.getByText('Back from GitHub.')).toHaveCount(0)
     await expect(page.getByText('vpsm-smoke')).toBeVisible()
     await expect(page.getByText('acme (2 repositories)')).toBeVisible()
     const repositories = page.getByRole('table').getByRole('row')
     await expect(repositories.filter({ hasText: 'Acme/Web' })).toContainText('trunk')
     await expect(repositories.filter({ hasText: 'Acme/Web' })).toContainText('Private')
     await expect(repositories.filter({ hasText: 'acme/api' })).toContainText('Public')
+
+    // Where GitHub sends the admin after installing the App (its Setup URL).
+    await page.goto('/admin/github?installation_id=5&setup_action=install')
+    await expect(page.getByText('Back from GitHub. The repository list updates within a minute.')).toBeVisible()
   })
 
   await test.step('sign out, after which the dashboard asks for the sign-in again', async () => {

@@ -24,8 +24,10 @@ function reasonOf(error: unknown): string {
  * Lists what the GitHub App can read and stores it for the dashboard, which never calls GitHub itself: the
  * repositories (replaced as a whole) and the status of the App with the repository count per installation. When
  * GitHub or the database fails the error is stored as the status instead and the previous repositories stay, so
- * an outage does not empty the dashboard's repository picker. Never throws; the status is returned as it was
- * meant to be stored, even when storing it failed (that is logged).
+ * an outage does not empty the dashboard's repository picker. A failed status keeps the App's slug when the App
+ * itself answered: the dashboard links to the App's install page with it, which is what an admin needs when the
+ * listing fails. Never throws; the status is returned as it was meant to be stored, even when storing it failed
+ * (that is logged).
  */
 export async function syncGithub(
   db: Db,
@@ -33,8 +35,9 @@ export async function syncGithub(
   now: () => Date = () => new Date(),
 ): Promise<GithubStatus> {
   let status: GithubStatus
+  let slug: string | undefined
   try {
-    const { slug } = await client.app()
+    slug = (await client.app()).slug
     const { installations, repositories } = await client.listRepositories()
     await replaceGithubRepositories(db, repositories)
     const counts = new Map<number, number>()
@@ -50,7 +53,7 @@ export async function syncGithub(
   } catch (error) {
     const reason = reasonOf(error)
     console.error(`github sync: ${reason}`)
-    status = { ok: false, checkedAt: now().toISOString(), error: reason }
+    status = { ok: false, checkedAt: now().toISOString(), ...(slug === undefined ? {} : { appSlug: slug }), error: reason }
   }
   try {
     await setGithubStatus(db, status)

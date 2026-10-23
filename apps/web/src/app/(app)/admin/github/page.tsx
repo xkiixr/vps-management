@@ -1,12 +1,15 @@
 import type { Metadata } from 'next'
 import { getGithubStatus, getLastWebhookDelivery, listGithubRepositories } from '@vpsm/db'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDateTime } from '@/lib/format'
 import { requestGithubSyncAction } from '@/server/actions/admin'
 import { webConfig } from '@/server/config'
 import { getDb } from '@/server/db'
+import { githubInstallUrl } from '@/server/github'
 import { requireAdmin } from '@/server/guards'
 import { SyncForm } from './sync-form'
 
@@ -19,17 +22,24 @@ function when(value: string): string {
   return Number.isNaN(date.getTime()) ? value : formatDateTime(date)
 }
 
+type Props = { searchParams: Promise<Record<string, string | string[] | undefined>> }
+
 // The web never calls GitHub: everything here was written to the database by the worker (the App's status and the
 // repositories it can read) or by the webhook endpoint (the last delivery), and is read fresh on every request.
-export default async function GithubPage() {
+export default async function GithubPage({ searchParams }: Props) {
   await requireAdmin()
   const db = getDb()
   const { panelOrigin, githubWebhookSecret } = webConfig()
-  const [status, delivery, repositories] = await Promise.all([
+  const [status, delivery, repositories, { setup_action: setupAction }] = await Promise.all([
     getGithubStatus(db),
     getLastWebhookDelivery(db),
     listGithubRepositories(db),
+    searchParams,
   ])
+  const installUrl = githubInstallUrl(status)
+  // GitHub sends the admin back here (the App's Setup URL) after installing it or changing its repositories. Only a
+  // notice: the installation event GitHub sent the webhook meanwhile is what asks the worker for a sync.
+  const backFromGithub = setupAction === 'install' || setupAction === 'update'
 
   return (
     <div className="grid gap-8">
@@ -39,6 +49,12 @@ export default async function GithubPage() {
           The GitHub App lets the worker clone private repositories, and its webhook deploys a service on every push.
         </p>
       </div>
+
+      {backFromGithub && (
+        <Alert className="max-w-3xl">
+          <AlertDescription>Back from GitHub. The repository list updates within a minute.</AlertDescription>
+        </Alert>
+      )}
 
       <Card className="max-w-3xl">
         <CardHeader>
@@ -74,6 +90,17 @@ export default async function GithubPage() {
             </dl>
           ) : (
             <p className="text-sm text-muted-foreground">Not set up: the worker has no GITHUB_APP_ID.</p>
+          )}
+          {installUrl && (
+            <div className="mt-6 grid gap-2">
+              <Button asChild className="w-fit">
+                <a href={installUrl}>Connect GitHub</a>
+              </Button>
+              <p className="text-sm text-muted-foreground">
+                Opens GitHub to install the App on your organization and choose which repositories it can read. The
+                list below follows within a minute after you save there.
+              </p>
+            </div>
           )}
         </CardContent>
       </Card>
