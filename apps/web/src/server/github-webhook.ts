@@ -6,6 +6,13 @@ import { logServerError } from './errors'
 
 /** The largest body GitHub may send (its own limit for a payload is 25 MB). */
 export const MAX_WEBHOOK_BYTES = 25 * 1024 * 1024
+/**
+ * The most bytes of webhook bodies the process holds at once, all requests together. Signatures can only be checked
+ * once a body is complete, so without this anybody could fill the dashboard's memory with bodies that are never signed.
+ */
+export const MAX_IN_FLIGHT_WEBHOOK_BYTES = 2 * MAX_WEBHOOK_BYTES
+/** How long a sender has for the whole body. A connection that drips bytes must not hold its share forever. */
+export const WEBHOOK_READ_DEADLINE_MS = 30_000
 
 const SIGNATURE = /^sha256=([0-9a-fA-F]{64})$/
 const BRANCH_PREFIX = 'refs/heads/'
@@ -119,6 +126,149 @@ const outcomeOf = ({ status, body }: WebhookResult) =>
   `${status} ${Object.entries(body)
     .map(([key, value]) => `${key}: ${String(value)}`)
     .join(', ')}`
+
+/** A number of bytes shared by everything that reserves from it. */
+export class ByteBudget {
+  #used = 0
+  constructor(readonly limit: number) {}
+
+  /** The bytes reserved and not yet released. */
+  get used(): number {
+    return this.#used
+  }
+
+  /** Reserves `bytes` if they fit beside what is reserved already, and says whether they did. */
+  tryReserve(bytes: number): boolean {
+    if (this.#used + bytes > this.limit) return false
+    this.#used += bytes
+    return true
+  }
+
+  release(bytes: number): void {
+    this.#used -= bytes
+  }
+}
+
+export type WebhookBodyLimits = {
+  /** The largest body accepted; a larger one is a 413. */
+  maxBytes: number
+  /** Shared by all requests: a body that does not fit beside the others is a 503. */
+  budget: ByteBudget
+  /** The time for the whole body; after it, a 408. */
+  deadlineMs: number
+}
+
+/** What the route uses: one budget for the whole process. */
+export const WEBHOOK_BODY_LIMITS: WebhookBodyLimits = {
+  maxBytes: MAX_WEBHOOK_BYTES,
+  budget: new ByteBudget(MAX_IN_FLIGHT_WEBHOOK_BYTES),
+  deadlineMs: WEBHOOK_READ_DEADLINE_MS,
+}
+
+const NO_STORE = { 'Cache-Control': 'no-store' }
+// Every refusal leaves the body unread, or only partly read, so the connection is closed after the answer instead of
+// being kept for the next request.
+const refuse = (status: number, error: string, headers: Record<string, string> = {}) =>
+  Response.json({ error }, { status, headers: { ...NO_STORE, Connection: 'close', ...headers } })
+const notConfigured = () => refuse(503, 'GitHub integration is not configured')
+const tooLarge = () => refuse(413, 'payload too large')
+const busy = () => refuse(503, 'too many webhook deliveries in progress', { 'Retry-After': '10' })
+const tooSlow = () => refuse(408, 'request timeout')
+
+export type WebhookBody =
+  /** `release` gives the body's bytes back to the budget; call it once the body is no longer needed. */
+  | { ok: true; body: Uint8Array; release: () => void }
+  | { ok: false; response: Response }
+
+const DEADLINE = Symbol('deadline')
+
+/**
+ * Reads the whole body within the limits, or answers why not. A declared Content-Length is checked and reserved before
+ * anything is read; a body without one is reserved chunk by chunk as it arrives. A refused stream is released, never
+ * cancelled: in the server it is the incoming request itself, and cancelling it destroys the socket the answer is
+ * about to be sent on. Whatever happens, what was reserved is given back unless the body is handed over.
+ */
+export async function readWebhookBody(request: Request, { maxBytes, budget, deadlineMs }: WebhookBodyLimits): Promise<WebhookBody> {
+  const header = request.headers.get('content-length')
+  const declared = header !== null && /^\d+$/.test(header) ? Number(header) : null
+  if (declared !== null && declared > maxBytes) return { ok: false, response: tooLarge() }
+
+  let reserved = 0
+  const release = () => {
+    budget.release(reserved)
+    reserved = 0
+  }
+  if (declared !== null) {
+    if (!budget.tryReserve(declared)) return { ok: false, response: busy() }
+    reserved = declared
+  }
+
+  let handedOver = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const chunks: Uint8Array[] = []
+    let size = 0
+    if (request.body) {
+      const reader = request.body.getReader()
+      const deadline = new Promise<typeof DEADLINE>((resolve) => {
+        timer = setTimeout(() => resolve(DEADLINE), deadlineMs)
+      })
+      const refuseWith = (response: Response): WebhookBody => {
+        // A read still pending is rejected by this, and that rejection is already handled by the race below.
+        reader.releaseLock()
+        return { ok: false, response }
+      }
+      for (;;) {
+        const next = await Promise.race([reader.read(), deadline])
+        if (next === DEADLINE) return refuseWith(tooSlow())
+        if (next.done) break
+        size += next.value.byteLength
+        if (size > maxBytes) return refuseWith(tooLarge())
+        if (size > reserved) {
+          if (!budget.tryReserve(size - reserved)) return refuseWith(busy())
+          reserved = size
+        }
+        chunks.push(next.value)
+      }
+    }
+    // The only copy: the chunks are dropped as soon as this returns.
+    const body = Buffer.concat(chunks, size)
+    handedOver = true
+    return { ok: true, body, release }
+  } finally {
+    clearTimeout(timer)
+    if (!handedOver) release()
+  }
+}
+
+export type ReceiveOptions = {
+  secret: string | undefined
+  /** Asked for only once a body has been read. */
+  db: () => Db
+  limits?: WebhookBodyLimits
+}
+
+/**
+ * One request to the webhook endpoint, as the route hands it over. Unconfigured, it is answered before anything is
+ * read; otherwise the body is read within the limits and handled while its bytes stay reserved.
+ */
+export async function receiveGithubWebhook(request: Request, o: ReceiveOptions): Promise<Response> {
+  if (!o.secret) return notConfigured()
+  const read = await readWebhookBody(request, o.limits ?? WEBHOOK_BODY_LIMITS)
+  if (!read.ok) return read.response
+  try {
+    const result = await handleGithubWebhook(o.db(), {
+      secret: o.secret,
+      event: request.headers.get('x-github-event'),
+      deliveryId: request.headers.get('x-github-delivery'),
+      signature: request.headers.get('x-hub-signature-256'),
+      body: read.body,
+    })
+    return Response.json(result.body, { status: result.status, headers: NO_STORE })
+  } finally {
+    read.release()
+  }
+}
 
 /**
  * Handles one delivery from GitHub. The signature over the raw bytes is the only authentication, so nothing of the

@@ -15,7 +15,17 @@ const mocks = vi.hoisted(() => ({ db: undefined as unknown }))
 vi.mock('@/server/db', () => ({ getDb: () => mocks.db }))
 
 import { POST } from '@/app/api/github/webhook/route'
-import { handleGithubWebhook, MAX_WEBHOOK_BYTES, verifyGithubSignature } from '@/server/github-webhook'
+import {
+  ByteBudget,
+  handleGithubWebhook,
+  MAX_IN_FLIGHT_WEBHOOK_BYTES,
+  MAX_WEBHOOK_BYTES,
+  receiveGithubWebhook,
+  verifyGithubSignature,
+  WEBHOOK_BODY_LIMITS,
+  WEBHOOK_READ_DEADLINE_MS,
+  type WebhookBodyLimits,
+} from '@/server/github-webhook'
 import { PASSWORD } from './helpers'
 
 const secret = 'test-webhook-secret-0123456789'
@@ -371,9 +381,189 @@ describe('the last webhook', () => {
   })
 })
 
+const webhookUrl = 'https://panel.example.com/api/github/webhook'
+
+/**
+ * A request whose body arrives when the test says so: `send` hands over bytes, `end` finishes the body and `fail`
+ * breaks it. `pulls()` says how often the reader asked for more, `cancelled()` whether it cancelled the stream.
+ */
+function held(headers: Record<string, string> = {}) {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  let pulls = 0
+  let cancelled = false
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start: (c) => void (controller = c),
+      pull: () => void (pulls += 1),
+      cancel: () => void (cancelled = true),
+    },
+    { highWaterMark: 0 },
+  )
+  const request = new Request(webhookUrl, { method: 'POST', body, headers, duplex: 'half' } as RequestInit)
+  return {
+    request,
+    send: (chunk: Uint8Array) => controller.enqueue(chunk),
+    end: () => controller.close(),
+    fail: (error: Error) => controller.error(error),
+    pulls: () => pulls,
+    cancelled: () => cancelled,
+  }
+}
+
+const signedHeaders = (event: string, body: string) => ({ 'x-github-event': event, 'x-hub-signature-256': sign(body) })
+
+describe('ByteBudget', () => {
+  test('hands out bytes up to its limit and takes back what is released', () => {
+    const budget = new ByteBudget(10)
+    expect(budget.limit).toBe(10)
+    expect(budget.tryReserve(6)).toBe(true)
+    expect(budget.tryReserve(5)).toBe(false)
+    expect(budget.used).toBe(6)
+    expect(budget.tryReserve(4)).toBe(true)
+    expect(budget.tryReserve(1)).toBe(false)
+    budget.release(6)
+    expect(budget.used).toBe(4)
+    expect(budget.tryReserve(6)).toBe(true)
+    budget.release(10)
+    expect(budget.used).toBe(0)
+  })
+})
+
+// The limits are small here so that the tests can fill them; the route uses WEBHOOK_BODY_LIMITS.
+describe('bodies in flight', () => {
+  const receive = (request: Request, limits: WebhookBodyLimits) => receiveGithubWebhook(request, { secret, db: () => t.db, limits })
+  const json = async (response: Response) => (await response.json()) as Record<string, unknown>
+  const pushOf = (digit: string) => pushBody({ after: digit.repeat(40) })
+  const size = bytes(pushOf('1')).byteLength
+
+  function expectBusy(response: Response) {
+    expect(response.status).toBe(503)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('connection')).toBe('close')
+    expect(response.headers.get('retry-after')).toBe('10')
+  }
+
+  test('a streamed body that does not fit beside the one in progress is a 503, queues nothing and gives its bytes back', async () => {
+    const limits = { maxBytes: size, budget: new ByteBudget(size + 10), deadlineMs: 5_000 }
+    const first = held(signedHeaders('push', pushOf('1')))
+    const second = held(signedHeaders('push', pushOf('2')))
+
+    const firstAnswer = receive(first.request, limits)
+    first.send(bytes(pushOf('1')))
+    await vi.waitFor(() => expect(limits.budget.used).toBe(size))
+
+    const secondAnswer = receive(second.request, limits)
+    second.send(bytes(pushOf('2')).subarray(0, 10))
+    await vi.waitFor(() => expect(limits.budget.used).toBe(size + 10))
+    second.send(bytes(pushOf('2')).subarray(10))
+    const refused = await secondAnswer
+    expectBusy(refused)
+    expect(await json(refused)).toEqual({ error: 'too many webhook deliveries in progress' })
+    // Released, not cancelled: in the server the stream is the request, and cancelling it would drop the connection.
+    expect(second.cancelled()).toBe(false)
+    expect(limits.budget.used).toBe(size)
+
+    first.end()
+    const accepted = await firstAnswer
+    expect(accepted.status).toBe(202)
+    expect(await json(accepted)).toEqual({ queued: 1 })
+    expect(await deploymentsOf(web)).toMatchObject([{ commitSha: '1'.repeat(40) }])
+    expect(limits.budget.used).toBe(0)
+  })
+
+  test('a Content-Length is reserved before anything arrives, and one that does not fit is a 503 without reading the body', async () => {
+    const limits = { maxBytes: size, budget: new ByteBudget(size + 10), deadlineMs: 5_000 }
+    const first = held({ ...signedHeaders('push', pushOf('1')), 'content-length': String(size) })
+    const firstAnswer = receive(first.request, limits)
+    await vi.waitFor(() => expect(limits.budget.used).toBe(size))
+
+    const second = held({ ...signedHeaders('ping', '{}'), 'content-length': '11' })
+    const refused = await receive(second.request, limits)
+    expectBusy(refused)
+    expect(await json(refused)).toEqual({ error: 'too many webhook deliveries in progress' })
+    expect(second.pulls()).toBe(0)
+    expect(second.cancelled()).toBe(false)
+    expect(limits.budget.used).toBe(size)
+
+    first.send(bytes(pushOf('1')))
+    first.end()
+    expect((await firstAnswer).status).toBe(202)
+    expect(limits.budget.used).toBe(0)
+  })
+
+  test('a body still unfinished at the deadline is a 408, the stream is left alone and its bytes are given back', async () => {
+    const limits = { maxBytes: 1000, budget: new ByteBudget(2000), deadlineMs: 50 }
+    // A Node stream, as in the server, that sends a little and then nothing more.
+    const incoming = new Readable({ read() {} })
+    incoming.push(Buffer.from('{"zen":'))
+    try {
+      const request = new Request(webhookUrl, {
+        method: 'POST',
+        body: Readable.toWeb(incoming) as ReadableStream,
+        headers: { ...signedHeaders('ping', '{"zen":"x"}'), 'content-length': '500' },
+        duplex: 'half',
+      } as RequestInit)
+      const answer = receive(request, limits)
+      await vi.waitFor(() => expect(limits.budget.used).toBe(500))
+      const response = await answer
+      expect(response.status).toBe(408)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(response.headers.get('connection')).toBe('close')
+      expect(await json(response)).toEqual({ error: 'request timeout' })
+      expect(incoming.destroyed).toBe(false)
+      expect(limits.budget.used).toBe(0)
+      expect(await getLastWebhookDelivery(t.db)).toBeNull()
+    } finally {
+      incoming.destroy()
+    }
+  })
+
+  test('a streamed body that is too large is a 413 and gives back what it had reserved', async () => {
+    const limits = { maxBytes: 10, budget: new ByteBudget(100), deadlineMs: 5_000 }
+    const body = held(signedHeaders('ping', '{}'))
+    const answer = receive(body.request, limits)
+    body.send(new Uint8Array(6))
+    await vi.waitFor(() => expect(limits.budget.used).toBe(6))
+    body.send(new Uint8Array(6))
+    const response = await answer
+    expect(response.status).toBe(413)
+    expect(response.headers.get('connection')).toBe('close')
+    expect(body.cancelled()).toBe(false)
+    expect(limits.budget.used).toBe(0)
+  })
+
+  test('a body that breaks while it is read throws, and gives back what it had reserved', async () => {
+    const limits = { maxBytes: 100, budget: new ByteBudget(100), deadlineMs: 5_000 }
+    const body = held({ ...signedHeaders('ping', '{}'), 'content-length': '40' })
+    const answer = receive(body.request, limits)
+    body.send(bytes('{"a"'))
+    await vi.waitFor(() => expect(body.pulls()).toBeGreaterThan(0))
+    body.fail(new Error('connection reset'))
+    await expect(answer).rejects.toThrow('connection reset')
+    expect(limits.budget.used).toBe(0)
+  })
+
+  test('the reservation is held while the delivery is handled and given back when that fails', async () => {
+    const limits = { maxBytes: size, budget: new ByteBudget(size), deadlineMs: 5_000 }
+    let usedWhileHandling: number | undefined
+    const failing = {
+      secret,
+      limits,
+      db: () => {
+        usedWhileHandling = limits.budget.used
+        throw new Error('no database')
+      },
+    }
+    const request = new Request(webhookUrl, { method: 'POST', body: pushOf('1'), headers: signedHeaders('push', pushOf('1')) })
+    await expect(receiveGithubWebhook(request, failing)).rejects.toThrow('no database')
+    expect(usedWhileHandling).toBe(size)
+    expect(limits.budget.used).toBe(0)
+  })
+})
+
 // The route reads the settings from the environment, the way the server does.
 describe('the route', () => {
-  const url = 'https://panel.example.com/api/github/webhook'
+  const url = webhookUrl
   const MIB = 1024 * 1024
 
   beforeEach(() => {
@@ -381,6 +571,10 @@ describe('the route', () => {
     vi.stubEnv('APPS_DOMAIN', 'apps.example.com')
     vi.stubEnv('PANEL_DOMAIN', 'panel.apps.example.com')
     vi.stubEnv('GITHUB_WEBHOOK_SECRET', secret)
+  })
+  // Whatever the request came to, nothing of it is still counted against the bodies in flight.
+  afterEach(() => {
+    expect(WEBHOOK_BODY_LIMITS.budget.used).toBe(0)
   })
 
   const post = (body: string | Uint8Array, headers: Record<string, string> = {}) =>
@@ -443,13 +637,60 @@ describe('the route', () => {
     const response = await signed('push', pushBody())
     expect(response.status).toBe(503)
     expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('connection')).toBe('close')
     expect(await json(response)).toEqual({ error: 'GitHub integration is not configured' })
     expect(await allDeployments()).toHaveLength(0)
   })
 
-  test('a Content-Length over 25 MiB is a 413 before the body is read, whatever the configuration', async () => {
-    expect(MAX_WEBHOOK_BYTES).toBe(25 * MIB)
+  // Unconfigured, there is nothing a body could be good for, so nobody can make the server hold one.
+  test('without GITHUB_WEBHOOK_SECRET the body is never read, even one that says it is over 25 MiB', async () => {
     vi.stubEnv('GITHUB_WEBHOOK_SECRET', '')
+    for (const headers of [{}, { 'content-length': String(MAX_WEBHOOK_BYTES + 1) }]) {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull() {
+            throw new Error('the body was read')
+          },
+        },
+        { highWaterMark: 0 },
+      )
+      const response = await POST(new Request(url, { method: 'POST', body, headers, duplex: 'half' } as RequestInit))
+      expect(response.status).toBe(503)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(response.headers.get('connection')).toBe('close')
+      expect(await json(response)).toEqual({ error: 'GitHub integration is not configured' })
+    }
+  })
+
+  test('at most twice 25 MiB of bodies is held at once, and 30 s is given to send one', () => {
+    expect(MAX_IN_FLIGHT_WEBHOOK_BYTES).toBe(2 * MAX_WEBHOOK_BYTES)
+    expect(WEBHOOK_READ_DEADLINE_MS).toBe(30_000)
+    expect(WEBHOOK_BODY_LIMITS).toMatchObject({ maxBytes: MAX_WEBHOOK_BYTES, deadlineMs: WEBHOOK_READ_DEADLINE_MS })
+    expect(WEBHOOK_BODY_LIMITS.budget.limit).toBe(MAX_IN_FLIGHT_WEBHOOK_BYTES)
+  })
+
+  test('two bodies of 25 MiB on their way take the whole budget: a third is a 503 before it is read', async () => {
+    const holders = [0, 1].map(() => held({ 'content-length': String(MAX_WEBHOOK_BYTES) }))
+    const pending = holders.map(({ request }) => POST(request))
+    await vi.waitFor(() => expect(WEBHOOK_BODY_LIMITS.budget.used).toBe(MAX_IN_FLIGHT_WEBHOOK_BYTES))
+
+    const third = held({ 'content-length': '2' })
+    const response = await POST(third.request)
+    expect(response.status).toBe(503)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('connection')).toBe('close')
+    expect(response.headers.get('retry-after')).toBe('10')
+    expect(await json(response)).toEqual({ error: 'too many webhook deliveries in progress' })
+    expect(third.pulls()).toBe(0)
+
+    // The two that were let in end without a signature.
+    for (const holder of holders) holder.end()
+    expect((await Promise.all(pending)).map((r) => r.status)).toEqual([401, 401])
+    expect(await allDeployments()).toHaveLength(0)
+  })
+
+  test('a Content-Length over 25 MiB is a 413 before the body is read', async () => {
+    expect(MAX_WEBHOOK_BYTES).toBe(25 * MIB)
     const { request, pulled } = streamed(1, { 'content-length': String(MAX_WEBHOOK_BYTES + 1) })
     const response = await POST(request)
     expect(response.status).toBe(413)
