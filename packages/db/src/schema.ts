@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm'
 import {
   type AnyPgColumn,
+  bigint,
   bigserial,
+  boolean,
   check,
   index,
   integer,
@@ -11,6 +13,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core'
 import type {
@@ -207,6 +210,21 @@ export const domains = pgTable(
   (t) => [check('domains_kind_check', sql`${t.kind} in ('generated', 'custom')`)],
 )
 
+// The repositories the GitHub App can see, as the worker last listed them. The id is GitHub's own, the rows are only
+// ever replaced as a whole (see replaceGithubRepositories), and full_name is unique without regard to letter case.
+export const githubRepositories = pgTable(
+  'github_repositories',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey(),
+    fullName: text('full_name').notNull(),
+    defaultBranch: text('default_branch').notNull(),
+    private: boolean('private').notNull(),
+    installationId: bigint('installation_id', { mode: 'number' }).notNull(),
+    syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('github_repositories_full_name_lower_idx').on(sql`lower(${t.fullName})`)],
+)
+
 export type Project = typeof projects.$inferSelect
 export type User = typeof users.$inferSelect
 export type Session = typeof sessions.$inferSelect
@@ -218,3 +236,4 @@ export type Service = typeof services.$inferSelect
 export type ServiceInstance = typeof serviceInstances.$inferSelect
 export type Deployment = typeof deployments.$inferSelect
 export type Domain = typeof domains.$inferSelect
+export type GithubRepository = typeof githubRepositories.$inferSelect

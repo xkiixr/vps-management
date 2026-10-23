@@ -101,7 +101,7 @@ test('the logs_closed_at migration closes the log of every deployment that is ov
   scratchDirs.push(baseline)
   const journal = await readJournal(migrationsDir)
   const before = journal.entries.filter((entry) => entry.tag < '0002')
-  expect(before.length).toBe(journal.entries.length - 1)
+  expect(before).toHaveLength(2)
   await mkdir(path.join(baseline, 'meta'))
   for (const entry of before) await cp(path.join(migrationsDir, `${entry.tag}.sql`), path.join(baseline, `${entry.tag}.sql`))
   await writeFile(path.join(baseline, 'meta', '_journal.json'), JSON.stringify({ ...journal, entries: before }))
