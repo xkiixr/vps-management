@@ -10,6 +10,7 @@ import type { PipelineDeps } from './deploy/pipeline'
 import { recoverInterruptedDeployments } from './deploy/recovery'
 import { runCommand } from './exec'
 import { createGithubAppClient, loadGithubAppKey } from './github/app-client'
+import { startGithubSync } from './github/sync'
 import { cleanupImages } from './images/retention'
 import { startCrashMonitor } from './monitor/crash-monitor'
 import { ensureNetworkAttachments } from './monitor/network-attachments'
@@ -34,7 +35,7 @@ async function main(): Promise<void> {
 
   // The order matters for the ready file the compose healthcheck (and so the web dashboard) waits for; see bootWorker.
   const {
-    prepared: { deps, sql, close },
+    prepared: { deps, sql, close, github },
   } = await bootWorker({
     clearReady: () => clearReady(),
     migrate: () => migrate(databaseUrl),
@@ -101,6 +102,13 @@ async function main(): Promise<void> {
   attachments.unref()
   const listen = async (channel: string, onNotify: () => void) => (await sql.listen(channel, () => onNotify())).unlisten
   const loop = startDeployLoop({ ...deps, listen }, controller.signal)
+  // Not awaited and not part of the race below: GitHub being down or slow must never keep the worker unhealthy or
+  // delay a deployment, and the sync is not essential to deploying (so a failure to even start it only gets logged).
+  const githubSync = github
+    ? startGithubSync({ db: deps.db, client: github, listen }, controller.signal).catch((error: unknown) =>
+        console.error(`github sync: ${messageOf(error)}`),
+      )
+    : undefined
   console.log('worker started')
 
   const stopRequested = new Promise<NodeJS.Signals>((resolve) => {
@@ -113,8 +121,16 @@ async function main(): Promise<void> {
   controller.abort()
   clearInterval(attachments)
   await clearReady().catch(() => undefined)
-  const finished = await Promise.race([loop.then(() => true), sleep(SHUTDOWN_GRACE_MS, false, { ref: false })])
-  if (!finished) console.error('the running deployment did not finish in time; it is marked FAILED on the next start')
+  // The running deployment (and a GitHub sync in progress) get the grace period; both must settle before it ends.
+  const finished = await Promise.race([
+    Promise.all([loop, githubSync]).then(() => true),
+    sleep(SHUTDOWN_GRACE_MS, false, { ref: false }),
+  ])
+  if (!finished) {
+    console.error(
+      'a deployment or the GitHub sync did not finish in time; a deployment still running is marked FAILED on the next start',
+    )
+  }
   await close()
   process.exit(0)
 }
