@@ -23,6 +23,9 @@ const PAGE_SIZE = 100
 const MAX_DETAIL_LENGTH = 200
 // The same shape fetch-source accepts for a clone URL.
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+// What GitHub's tokens are made of. Anything else is not one: a control character would end up in Node's "invalid
+// header value" message, and the token is about to go into an Authorization header and a clone URL.
+const TOKEN_PATTERN = /^[A-Za-z0-9_]+$/
 
 /**
  * The JWT with which the app itself speaks to GitHub: RS256, issued 60 s in the past (GitHub rejects a token from
@@ -136,7 +139,10 @@ export function createGithubAppClient(o: GithubAppClientOptions): GithubAppClien
     const reply = await request('POST', `/app/installations/${installationId}/access_tokens`, jwt(), {
       ...(repository === undefined ? {} : { body: { repositories: [repository], permissions: { contents: 'read' } } }),
     })
-    return field<string>(reply, object(reply), 'token', 'string')
+    const token = field<string>(reply, object(reply), 'token', 'string')
+    // The error is about the shape of the answer and does not repeat the token.
+    if (!TOKEN_PATTERN.test(token)) throw unexpected(reply)
+    return token
   }
 
   return {
@@ -162,6 +168,10 @@ export function createGithubAppClient(o: GithubAppClientOptions): GithubAppClien
         const reply = await request('GET', `/app/installations?per_page=${PAGE_SIZE}&page=${page}`, jwt())
         const items = array(reply)
         for (const item of items) {
+          // Nothing can be read through a suspended installation, and GitHub refuses to issue a token for it: one
+          // such installation must not fail the listing of the others (its repositories drop out of the list).
+          const suspended = (item as { suspended_at?: unknown } | null)?.suspended_at
+          if (suspended !== null && suspended !== undefined) continue
           // An installation on an enterprise has no account.
           const account = (item as { account?: { login?: unknown } | null } | null)?.account?.login
           installations.push({

@@ -156,6 +156,42 @@ test('an answer that is not what the call returns is a GithubApiError, not a Typ
   await expect(noToken.client.repositoryToken('acme/web')).rejects.toBeInstanceOf(GithubApiError)
 })
 
+test.each(['', 'ghs_bad token', 'ghs_bad\r\nX-Injected: 1', 'ghs_bad@evil.example', 'ghs_bäd', 'ghs/../bad'])(
+  'repositoryToken refuses a token of an odd shape (%j) as an unexpected answer that does not repeat it',
+  async (token) => {
+    const { client, calls } = clientFor((call) =>
+      route(call) === 'GET /repos/acme/web/installation' ? { json: { id: 7 } } : { status: 201, json: { token } },
+    )
+
+    const error = (await client.repositoryToken('acme/web').catch((e: unknown) => e)) as GithubApiError
+
+    expect(error).toBeInstanceOf(GithubApiError)
+    expect(error.status).toBe(201)
+    expect(error.message).toBe('GitHub API POST /app/installations/7/access_tokens: 201 unexpected answer')
+    expect(calls).toHaveLength(2)
+  },
+)
+
+test('listRepositories refuses an installation token of an odd shape before using it as a header', async () => {
+  const { client, calls } = clientFor((call) => {
+    switch (route(call)) {
+      case 'GET /app/installations':
+        return { json: [{ id: 7, account: { login: 'acme' } }] }
+      case 'POST /app/installations/7/access_tokens':
+        return { status: 201, json: { token: 'ghs_bad\nvalue' } }
+    }
+    return { status: 500, json: { message: 'unexpected call' } }
+  })
+
+  const error = (await client.listRepositories().catch((e: unknown) => e)) as GithubApiError
+
+  expect(error).toBeInstanceOf(GithubApiError)
+  expect(error.message).toBe('GitHub API POST /app/installations/7/access_tokens: 201 unexpected answer')
+  expect(error.message).not.toContain('ghs_bad')
+  // The token never went out in an Authorization header.
+  expect(calls.map(route)).toEqual(['GET /app/installations', 'POST /app/installations/7/access_tokens'])
+})
+
 test('app() returns the slug', async () => {
   const { client, calls } = clientFor(() => ({ json: { id: APP_ID, slug: 'vpsm-team', name: 'vpsm' } }))
 
@@ -269,6 +305,40 @@ test('listRepositories returns a repository only once even when two installation
     [2, 7],
     [3, 8],
   ])
+})
+
+test('listRepositories skips a suspended installation without asking for its token', async () => {
+  const { client, calls } = clientFor((call) => {
+    switch (route(call)) {
+      case 'GET /app/installations':
+        return {
+          json: [
+            { id: 7, account: { login: 'acme' }, suspended_at: null },
+            { id: 8, account: { login: 'gone' }, suspended_at: '2026-10-01T08:00:00Z' },
+            { id: 9, account: { login: 'bob' } },
+          ],
+        }
+      case 'POST /app/installations/7/access_tokens':
+        return { status: 201, json: { token: 'ghs_7' } }
+      case 'POST /app/installations/9/access_tokens':
+        return { status: 201, json: { token: 'ghs_9' } }
+      case 'GET /installation/repositories':
+        return { json: { total_count: 1, repositories: [repo(bearer(call) === 'ghs_7' ? 1 : 2, 'x/y')] } }
+    }
+    return { status: 500, json: { message: 'unexpected call' } }
+  })
+
+  const result = await client.listRepositories()
+
+  expect(result.installations).toEqual([
+    { id: 7, account: 'acme' },
+    { id: 9, account: 'bob' },
+  ])
+  expect(result.repositories.map((r) => [r.id, r.installationId])).toEqual([
+    [1, 7],
+    [2, 9],
+  ])
+  expect(calls.map(route)).not.toContain('POST /app/installations/8/access_tokens')
 })
 
 test('a failure while listing names the call without its query, the token or the JWT', async () => {
