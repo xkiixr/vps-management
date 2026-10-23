@@ -22,9 +22,10 @@ import {
 import { setupTestDb } from '@vpsm/db/testing'
 import { BuildError } from '../src/build/errors'
 import { runDeployment } from '../src/deploy/pipeline'
+import { GithubApiError } from '../src/github/app-client'
 import { waitHealthy } from '../src/runtime/healthcheck'
 import { SourceError } from '../src/source/fetch-source'
-import { fakeDeps, type FakeDeps } from './fakes'
+import { fakeDeps, fakeGithub, type FakeDeps } from './fakes'
 
 // Every status a deployment was asked to move to, starting from QUEUED. Recorded before the real call,
 // so an invalid transition the pipeline attempts shows up here too.
@@ -218,7 +219,7 @@ describe('happy path', () => {
     const d = await queue()
     await runDeployment(d.id, deps)
     expect(await logRows(d.id)).toEqual([
-      ['build', '==> Cloning acme/web@main'],
+      ['build', '==> Cloning acme/web@main (no GitHub App: public repositories only)'],
       ['build', '==> Building with railpack'],
       ['deploy', '==> Starting container'],
       ['deploy', '==> Healthcheck (http /health)'],
@@ -899,6 +900,23 @@ describe('closing the log', () => {
       error.mockRestore()
     }
   })
+
+  test('failing to close it is reported without the installation token', async () => {
+    deps.github = fakeGithub({ 'acme/web': 'ghs_secret' })
+    const d = await queue()
+    closing.error = new Error('connection lost while talking to ghs_secret\nparams: ' + d.id)
+    const error = silenceConsoleError()
+    try {
+      await expect(runDeployment(d.id, deps)).resolves.toBeUndefined()
+      expect(await get(d.id)).toMatchObject({ status: 'SUCCESS', logsClosedAt: null })
+      const reported = error.mock.calls.map((call) => String(call[0])).join('\n')
+      expect(reported).toContain('could not close its log: connection lost while talking to ***')
+      expect(reported).not.toContain('ghs_secret')
+      expect(reported).not.toContain('params:')
+    } finally {
+      error.mockRestore()
+    }
+  })
 })
 
 describe('rollback', () => {
@@ -1238,5 +1256,164 @@ describe('work directory and secrets', () => {
     await runDeployment(bad.id, deps)
     expect((await get(bad.id)).status).toBe('FAILED')
     expect(fs.existsSync(path.join(deps.config.workDir, bad.id))).toBe(false)
+  })
+})
+
+describe('cloning with the GitHub App', () => {
+  /** Records the calls of fetchSource, which also prints where it clones from, like git does. */
+  function recordFetches() {
+    const real = deps.fetchSource
+    const fetchSource = vi.fn<typeof real>(async (i) => {
+      i.onLine(`Cloning from ${i.cloneUrl}`, 'stderr')
+      return real(i)
+    })
+    deps.fetchSource = fetchSource
+    return fetchSource
+  }
+
+  test('clones with an installation token of the repository and never logs it', async () => {
+    const github = fakeGithub({ 'acme/web': 'ghs_secret' })
+    deps.github = github
+    const { railpackPrepare: realPrepare, buildImage: realBuild } = deps
+    const fetchSource = recordFetches()
+    deps.railpackPrepare = async (i) => {
+      i.onLine('prepare saw ghs_secret', 'stdout')
+      return realPrepare(i)
+    }
+    deps.buildImage = async (i) => {
+      i.onLine('#1 token=ghs_secret', 'stdout')
+      return realBuild(i)
+    }
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    expect((await get(d.id)).status).toBe('SUCCESS')
+    const lines = await logLines(d.id)
+    expect(lines).toContain('==> Cloning acme/web@main with the GitHub App')
+    expect(lines).toContain('Cloning from https://x-access-token:***@github.com/acme/web.git')
+    expect(lines).toContain('prepare saw ***')
+    expect(lines).toContain('#1 token=***')
+    expect(lines.join('\n')).not.toContain('ghs_secret')
+    expect(fetchSource.mock.calls[0]![0]).toMatchObject({
+      cloneUrl: 'https://x-access-token:ghs_secret@github.com/acme/web.git',
+      redact: ['ghs_secret'],
+    })
+    expect(github.requested).toEqual(['acme/web'])
+  })
+
+  test('every deployment asks for a token of its own', async () => {
+    const github = fakeGithub({ 'acme/web': 'ghs_secret' })
+    deps.github = github
+
+    await runDeployment((await queue()).id, deps)
+    await runDeployment((await queue()).id, deps)
+
+    expect(github.requested).toEqual(['acme/web', 'acme/web'])
+  })
+
+  test('a repository the app is not installed on is cloned without credentials, and the log says so', async () => {
+    const github = fakeGithub({ 'acme/other': 'ghs_secret' })
+    deps.github = github
+    const fetchSource = recordFetches()
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    expect((await get(d.id)).status).toBe('SUCCESS')
+    const lines = await logLines(d.id)
+    expect(lines).toContain(
+      '==> Cloning acme/web@main (the GitHub App is not installed on this repository: public repositories only)',
+    )
+    expect(lines).toContain('Cloning from https://github.com/acme/web.git')
+    expect(fetchSource.mock.calls[0]![0]).toMatchObject({ cloneUrl: 'https://github.com/acme/web.git', redact: [] })
+    expect(github.requested).toEqual(['acme/web'])
+  })
+
+  test('without a GitHub App it clones without credentials', async () => {
+    expect(deps.github).toBeUndefined()
+    const fetchSource = recordFetches()
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    expect((await get(d.id)).status).toBe('SUCCESS')
+    const lines = await logLines(d.id)
+    expect(lines).toContain('==> Cloning acme/web@main (no GitHub App: public repositories only)')
+    expect(lines).toContain('Cloning from https://github.com/acme/web.git')
+    expect(fetchSource.mock.calls[0]![0]).toMatchObject({ cloneUrl: 'https://github.com/acme/web.git', redact: [] })
+  })
+
+  test('a GitHub error fails the deployment with a readable reason, before anything is cloned', async () => {
+    deps.github = {
+      repositoryToken: async () => {
+        throw new GithubApiError(
+          'GitHub API POST /app/installations/7/access_tokens: 403 Resource not accessible by integration',
+          403,
+        )
+      },
+    }
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    const reason =
+      'could not get access to acme/web from GitHub: GitHub API POST /app/installations/7/access_tokens: 403 Resource not accessible by integration'
+    expect(await get(d.id)).toMatchObject({ status: 'FAILED', failureReason: reason })
+    expect(await statusHistory(d.id)).toEqual(['QUEUED', 'BUILDING', 'FAILED'])
+    expect(await logRows(d.id)).toEqual([['build', `==> Deployment failed: ${reason}`]])
+    expect(deps.events).not.toContain('fetch')
+  })
+
+  test('anything but a GitHub error while getting the token is an internal error', async () => {
+    deps.github = {
+      repositoryToken: async () => {
+        throw new TypeError('bug in the client')
+      },
+    }
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    expect(await get(d.id)).toMatchObject({ status: 'FAILED', failureReason: 'internal error: bug in the client' })
+    expect(deps.events).not.toContain('fetch')
+  })
+
+  test.each([
+    ['source error', 'fetchSource', (msg: string) => new SourceError(msg), 'could not reach '],
+    ['unexpected error', 'buildImage', (msg: string) => new Error(msg), 'internal error: could not reach '],
+  ] as const)('the installation token never reaches the failure reason (%s)', async (_label, dep, makeError, prefix) => {
+    deps.github = fakeGithub({ 'acme/web': 'ghs_secret' })
+    deps[dep] = async () => {
+      throw makeError('could not reach https://x-access-token:ghs_secret@github.com/acme/web.git')
+    }
+    const d = await queue()
+
+    await runDeployment(d.id, deps)
+
+    const row = await get(d.id)
+    expect(row.status).toBe('FAILED')
+    expect(row.failureReason).toBe(`${prefix}https://x-access-token:***@github.com/acme/web.git`)
+    expect((await logLines(d.id)).join('\n')).not.toContain('ghs_secret')
+  })
+
+  test('the installation token never reaches the console', async () => {
+    deps.github = fakeGithub({ 'acme/web': 'ghs_secret' })
+    deps.waitHealthy = async () => ({ ok: false, reason: 'healthcheck timed out' })
+    // Removing the container that failed is reported to the console, with whatever Docker said.
+    deps.docker.stopAndRemove = async () => {
+      throw new Error('docker failed: ghs_secret')
+    }
+    const d = await queue()
+    const error = silenceConsoleError()
+    try {
+      await runDeployment(d.id, deps)
+      const reported = error.mock.calls.map((call) => String(call[0])).join('\n')
+      expect(reported).toContain('could not remove vpsm-web-')
+      expect(reported).toContain('docker failed: ***')
+      expect(reported).not.toContain('ghs_secret')
+    } finally {
+      error.mockRestore()
+    }
   })
 })

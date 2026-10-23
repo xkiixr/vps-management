@@ -5,6 +5,7 @@ import type Dockerode from 'dockerode'
 import type { Db } from '@vpsm/db'
 import { loadConfig } from '../src/config'
 import type { PipelineDeps } from '../src/deploy/pipeline'
+import type { GithubAppClient } from '../src/github/app-client'
 import { DEPLOYMENT_LABEL, INSTANCE_LABEL, MEMORY_LABEL } from '../src/runtime/container-spec'
 import type { ContainerState, DockerRuntime, ManagedContainer } from '../src/runtime/docker-runtime'
 
@@ -200,6 +201,23 @@ export class FakeDocker implements DockerRuntime {
     return () => {
       this.dieSubscriptions.delete(subscription)
     }
+  }
+}
+
+/**
+ * A GitHub App that hands out `tokens[repo]`; a repository it does not list is one the app is not installed on
+ * (`null`). `requested` holds every repository a token was asked for, in order.
+ */
+export function fakeGithub(tokens: Record<string, string>): Pick<GithubAppClient, 'repositoryToken'> & {
+  requested: string[]
+} {
+  const requested: string[] = []
+  return {
+    requested,
+    repositoryToken: async (repo) => {
+      requested.push(repo)
+      return tokens[repo] ?? null
+    },
   }
 }
 

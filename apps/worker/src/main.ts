@@ -9,6 +9,7 @@ import { startDeployLoop } from './deploy/loop'
 import type { PipelineDeps } from './deploy/pipeline'
 import { recoverInterruptedDeployments } from './deploy/recovery'
 import { runCommand } from './exec'
+import { createGithubAppClient, loadGithubAppKey } from './github/app-client'
 import { cleanupImages } from './images/retention'
 import { startCrashMonitor } from './monitor/crash-monitor'
 import { ensureNetworkAttachments } from './monitor/network-attachments'
@@ -39,6 +40,14 @@ async function main(): Promise<void> {
     migrate: () => migrate(databaseUrl),
     prepare: async () => {
       const config = loadConfig()
+      // A key that cannot be read ends the boot with the reason, visible in `docker compose logs worker`. Nothing
+      // is sent to GitHub here: GitHub being down must not keep the worker from starting.
+      const github = config.githubApp
+        ? createGithubAppClient({
+            appId: config.githubApp.appId,
+            privateKey: await loadGithubAppKey(config.githubApp.privateKeyFile),
+          })
+        : undefined
       const { db, sql, close } = createDb(databaseUrl)
       const docker = createDockerRuntime()
       await ensureBuilder(runCommand, (line) => console.log(`buildx: ${line}`))
@@ -61,8 +70,10 @@ async function main(): Promise<void> {
           const removed = await cleanupImages({ db, docker, config }, serviceInstanceId)
           if (removed.length > 0) console.log(`removed ${removed.length} old image(s): ${removed.join(', ')}`)
         },
+        // Deployments can only ask for a token; the rest of the client is for the repository sync.
+        github: github && { repositoryToken: (repo) => github.repositoryToken(repo) },
       }
-      return { deps, sql, close }
+      return { deps, sql, close, github }
     },
     recover: async ({ deps }) => {
       const recovered = await recoverInterruptedDeployments(deps)

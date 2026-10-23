@@ -30,6 +30,7 @@ import { BuildError } from '../build/errors'
 import type { railpackPrepare } from '../build/railpack'
 import type { WorkerConfig } from '../config'
 import type { LineHandler, RunCommand } from '../exec'
+import { GithubApiError, type GithubAppClient } from '../github/app-client'
 import { effectiveResourceLimits } from '../resource-limits'
 import { buildContainerSpec, resourceLimitError } from '../runtime/container-spec'
 import type { DockerRuntime } from '../runtime/docker-runtime'
@@ -50,6 +51,8 @@ export type PipelineDeps = {
   waitHealthy: typeof waitHealthy
   regenerateRoutes: () => Promise<void>
   cleanupImages: (serviceInstanceId: string) => Promise<void>
+  /** Without a GitHub App (`GITHUB_APP_ID` unset) this is undefined and repositories are cloned without credentials. */
+  github?: Pick<GithubAppClient, 'repositoryToken'>
 }
 
 type Builder = 'railpack' | 'dockerfile'
@@ -79,6 +82,11 @@ type Job = {
   status: DeploymentStatus
   /** The container this job started, removed again if the deployment fails. */
   container?: string
+  /**
+   * What must never be written down. It grows while the job runs: the installation token is pushed the moment it is
+   * returned, before it is used anywhere, and `redact` replaces everything that was in it until then.
+   */
+  secrets: string[]
   log(phase: LogPhase, text: string): void
   redact(text: string): string
 }
@@ -97,8 +105,9 @@ const reusesImage = (trigger: DeploymentTrigger) => trigger === 'rollback' || tr
  * the switch leaves the old container untouched, removes the new one and marks the deployment FAILED.
  */
 export async function runDeployment(deploymentId: string, deps: PipelineDeps): Promise<void> {
-  const token: string | undefined = undefined // replaced by the GitHub App installation token in the next task
-  const redact = (text: string) => (token ? text.replaceAll(token, '***') : text)
+  // Empty at first; the job adds the installation token once it has one. Every message about the job is redacted.
+  const secrets: string[] = []
+  const redact = (text: string) => secrets.reduce((out, secret) => (secret ? out.replaceAll(secret, '***') : out), text)
   let ctx: DeploymentContext
   try {
     ctx = await loadDeploymentContext(deps.db, deploymentId)
@@ -124,6 +133,7 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
     deps,
     dir: path.join(deps.config.workDir, ctx.deployment.id),
     status: 'QUEUED',
+    secrets,
     log: (phase, text) => sink.line(phase, redact(text)),
     redact,
   }
@@ -134,13 +144,13 @@ export async function runDeployment(deploymentId: string, deps: PipelineDeps): P
   } finally {
     // Also after a failed clone, which can leave the token behind in .git/config.
     await fs.rm(job.dir, { recursive: true, force: true }).catch((error) => {
-      console.error(`deployment ${deploymentId}: could not remove ${job.dir}: ${messageOf(error)}`)
+      console.error(`deployment ${deploymentId}: could not remove ${job.dir}: ${job.redact(messageOf(error))}`)
     })
     await sink.close()
     // Last, after the final status and after the last line is in the database: a reader of the log stops when it
     // sees this, not when it sees a final status (SUCCESS is set before the lines about going live and about
     // stopping the old container, FAILED before the failure line is written).
-    await closeLog(deps.db, ctx.deployment.id, redact)
+    await closeLog(deps.db, ctx.deployment.id, job.redact)
   }
 }
 
@@ -239,15 +249,38 @@ async function startReuse(job: Job, target: ReuseTarget): Promise<Image> {
   return { tag: target.tag, snapshot: target.snapshot }
 }
 
+/**
+ * How to clone `repo`: with a token of the GitHub App when it is installed there, else without credentials (which
+ * only works for a public repository). `note` completes the first line of the log.
+ */
+async function cloneAccess(job: Job, repo: string): Promise<{ token?: string; note: string }> {
+  const { github } = job.deps
+  if (!github) return { note: ' (no GitHub App: public repositories only)' }
+  let token: string | null
+  try {
+    token = await github.repositoryToken(repo)
+  } catch (error) {
+    // Anything else is a bug and stays an internal error.
+    if (error instanceof GithubApiError) {
+      throw new DeploymentFailure(`could not get access to ${repo} from GitHub: ${error.message}`)
+    }
+    throw error
+  }
+  if (token === null) return { note: ' (the GitHub App is not installed on this repository: public repositories only)' }
+  // Before it is used anywhere: the clone URL, git's output and every error from here on carry it.
+  job.secrets.push(token)
+  return { token, note: ' with the GitHub App' }
+}
+
 async function buildPhase(job: Job): Promise<Image> {
   const { deps, ctx } = job
   const { source, build, deploy } = ctx.instance
-  const token: string | undefined = undefined // replaced by the GitHub App installation token in the next task
   const onLine: LineHandler = (line) => job.log('build', line)
 
   await transition(job, 'BUILDING')
   if (!source) throw new SourceError('service has no source repository')
-  job.log('build', `==> Cloning ${source.repo}@${source.branch}`)
+  const { token, note } = await cloneAccess(job, source.repo)
+  job.log('build', `==> Cloning ${source.repo}@${source.branch}${note}`)
   await fs.mkdir(job.dir, { recursive: true })
   const fetched = await deps.fetchSource({
     cloneUrl: githubCloneUrl(source.repo, token),
