@@ -10,6 +10,7 @@ const nextConfig: NextConfig = {
   transpilePackages: ['@vpsm/core', '@vpsm/db'],
   // Native addon and a driver that must be required at runtime, not bundled.
   serverExternalPackages: ['@node-rs/argon2', 'postgres'],
+  allowedDevOrigins: ['http://localhost:3000', 'http://localhost:3001'],
   // The panel is same-site with the team's apps, so any of them could frame it, and a click inside the frame would
   // carry the panel's own Origin and its SameSite=Lax cookie past every check of a server action. No page of the
   // panel may be framed by anyone (X-Frame-Options for older browsers, frame-ancestors for the rest).
