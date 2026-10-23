@@ -48,7 +48,8 @@ test('reads every variable from the environment', () => {
       WORK_DIR: '/data/work',
       TLS_MODE: 'dns-wildcard',
       PUBLIC_HTTPS_PORT: '8443',
-      GITHUB_TOKEN: 'ghs_abc',
+      GITHUB_APP_ID: '5435849',
+      GITHUB_APP_PRIVATE_KEY_FILE: '/keys/app.pem',
       PANEL_DOMAIN: 'panel.paas.duckdns.org',
       PANEL_UPSTREAM: 'http://my-web:4000',
     }),
@@ -66,15 +67,20 @@ test('reads every variable from the environment', () => {
     workDir: '/data/work',
     tlsMode: 'dns-wildcard',
     publicHttpsPort: 8443,
-    githubToken: 'ghs_abc',
+    githubApp: { appId: 5435849, privateKeyFile: '/keys/app.pem' },
     panelDomain: 'panel.paas.duckdns.org',
     panelUpstream: 'http://my-web:4000',
   })
 })
 
 test('an empty variable counts as unset', () => {
-  const config = loadConfig({ APPS_DOMAIN: 'apps.example.com', GITHUB_TOKEN: '', MEMORY_BUDGET_MB: '' })
-  expect(config.githubToken).toBeUndefined()
+  const config = loadConfig({
+    APPS_DOMAIN: 'apps.example.com',
+    GITHUB_APP_ID: '',
+    GITHUB_APP_PRIVATE_KEY_FILE: '',
+    MEMORY_BUDGET_MB: '',
+  })
+  expect(config.githubApp).toBeUndefined()
   expect(config.memoryBudgetMb).toBe(5632)
   expect(() => loadConfig({ APPS_DOMAIN: '' })).toThrow(/APPS_DOMAIN/)
 })
@@ -262,15 +268,55 @@ describe('PANEL_DOMAIN with the wildcard certificate (TLS_MODE=dns-wildcard)', (
   })
 })
 
-test('the error never contains the token', () => {
-  let message = ''
-  try {
-    loadConfig({ GITHUB_TOKEN: 'ghs_secret' })
-  } catch (error) {
-    message = (error as Error).message
-  }
-  expect(message).toMatch(/APPS_DOMAIN/)
-  expect(message).not.toContain('ghs_secret')
+describe('the GitHub App settings', () => {
+  const load = (env: Record<string, string>) => () => loadConfig({ APPS_DOMAIN: 'apps.example.com', ...env })
+
+  test('GITHUB_APP_ID turns the app on with the default key path', () => {
+    expect(load({ GITHUB_APP_ID: '5435849' })().githubApp).toEqual({
+      appId: 5435849,
+      privateKeyFile: '/run/secrets/github-app.pem',
+    })
+    expect(load({ GITHUB_APP_ID: '5435849', GITHUB_APP_PRIVATE_KEY_FILE: '/keys/app.pem' })().githubApp).toEqual({
+      appId: 5435849,
+      privateKeyFile: '/keys/app.pem',
+    })
+  })
+
+  test('without GITHUB_APP_ID there is no app, whatever the key path says', () => {
+    expect('githubApp' in load({})()).toBe(false)
+    expect('githubApp' in load({ GITHUB_APP_PRIVATE_KEY_FILE: '/keys/app.pem' })()).toBe(false)
+  })
+
+  test.each(['abc', '0', '-5', '1.5', '12abc', ' ', 'NaN'])('GITHUB_APP_ID=%j is rejected', (id) => {
+    expect(load({ GITHUB_APP_ID: id })).toThrow(/^invalid worker configuration: GITHUB_APP_ID /)
+  })
+
+  test('GITHUB_APP_PRIVATE_KEY_FILE must be an absolute path', () => {
+    expect(load({ GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY_FILE: 'keys/app.pem' })).toThrow(
+      /^invalid worker configuration: GITHUB_APP_PRIVATE_KEY_FILE must be an absolute path$/,
+    )
+  })
+
+  test('GITHUB_TOKEN is not read any more', () => {
+    const config = load({ GITHUB_TOKEN: 'ghs_abc' })()
+    expect(config).toEqual(load({})())
+    expect(config).not.toHaveProperty('githubToken')
+    expect(Object.values(config)).not.toContain('ghs_abc')
+  })
+
+  test('the errors name the variable without echoing its value', () => {
+    let message = ''
+    try {
+      loadConfig({ GITHUB_APP_ID: 'ghs_secret', GITHUB_APP_PRIVATE_KEY_FILE: 'relative/secretish.pem' })
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toMatch(/APPS_DOMAIN/)
+    expect(message).toMatch(/GITHUB_APP_ID/)
+    expect(message).toMatch(/GITHUB_APP_PRIVATE_KEY_FILE/)
+    expect(message).not.toContain('ghs_secret')
+    expect(message).not.toContain('secretish')
+  })
 })
 
 describe('WORK_DIR is emptied at startup, so it must be a dedicated directory', () => {

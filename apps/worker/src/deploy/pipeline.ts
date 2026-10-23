@@ -97,7 +97,7 @@ const reusesImage = (trigger: DeploymentTrigger) => trigger === 'rollback' || tr
  * the switch leaves the old container untouched, removes the new one and marks the deployment FAILED.
  */
 export async function runDeployment(deploymentId: string, deps: PipelineDeps): Promise<void> {
-  const token = deps.config.githubToken
+  const token: string | undefined = undefined // replaced by the GitHub App installation token in the next task
   const redact = (text: string) => (token ? text.replaceAll(token, '***') : text)
   let ctx: DeploymentContext
   try {
@@ -242,7 +242,7 @@ async function startReuse(job: Job, target: ReuseTarget): Promise<Image> {
 async function buildPhase(job: Job): Promise<Image> {
   const { deps, ctx } = job
   const { source, build, deploy } = ctx.instance
-  const token = deps.config.githubToken
+  const token: string | undefined = undefined // replaced by the GitHub App installation token in the next task
   const onLine: LineHandler = (line) => job.log('build', line)
 
   await transition(job, 'BUILDING')

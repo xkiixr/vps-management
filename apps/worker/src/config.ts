@@ -19,7 +19,11 @@ export type WorkerConfig = {
   tlsMode: 'http01' | 'dns-wildcard'
   /** The host port that reaches Traefik's HTTPS entrypoint; it only ends up in the URLs the worker prints. */
   publicHttpsPort: number
-  githubToken?: string
+  /**
+   * The GitHub App the team registered; without GITHUB_APP_ID there is none and only public repositories can be
+   * cloned. The key is read from `privateKeyFile` by the worker alone and never leaves it.
+   */
+  githubApp?: { appId: number; privateKeyFile: string }
   /** The hostname of the web dashboard. Without it the worker does not route to the panel at all. */
   panelDomain?: string
   /** Where Traefik reaches the web dashboard: a container name on the shared network and its port. */
@@ -60,7 +64,9 @@ const fields = z.object({
   ),
   TLS_MODE: z.enum(['http01', 'dns-wildcard']).default('http01'),
   PUBLIC_HTTPS_PORT: z.coerce.number().int().min(1).max(65535).default(443),
-  GITHUB_TOKEN: z.string().optional(),
+  GITHUB_APP_ID: z.coerce.number().int().positive().optional(),
+  // A read-only bind mount (docker-compose.yml); the default is where the compose file puts it.
+  GITHUB_APP_PRIVATE_KEY_FILE: absolutePath('/run/secrets/github-app.pem'),
   PANEL_DOMAIN: z.string().refine(isValidHostname, 'must be a lowercase hostname such as panel.apps.example.com').optional(),
   // Ends up in the Traefik config, so only `http://<container name>:<port>` is accepted.
   PANEL_UPSTREAM: text('http://vpsm-web:3000').refine((url) => UPSTREAM_URL_PATTERN.test(url), 'must look like http://vpsm-web:3000'),
@@ -119,7 +125,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     workDir: e.WORK_DIR,
     tlsMode: e.TLS_MODE,
     publicHttpsPort: e.PUBLIC_HTTPS_PORT,
-    ...(e.GITHUB_TOKEN === undefined ? {} : { githubToken: e.GITHUB_TOKEN }),
+    ...(e.GITHUB_APP_ID === undefined
+      ? {}
+      : { githubApp: { appId: e.GITHUB_APP_ID, privateKeyFile: e.GITHUB_APP_PRIVATE_KEY_FILE } }),
     ...(e.PANEL_DOMAIN === undefined ? {} : { panelDomain: e.PANEL_DOMAIN }),
     panelUpstream: e.PANEL_UPSTREAM,
   }

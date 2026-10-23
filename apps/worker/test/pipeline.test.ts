@@ -885,17 +885,15 @@ describe('closing the log', () => {
     expect(closing.snapshots.has(d.id)).toBe(false)
   })
 
-  test('failing to close it is reported without the message of the database or the token, and changes nothing else', async () => {
-    deps.config = { ...deps.config, githubToken: 'ghp_secret_token' }
+  test('failing to close it is reported without the message of the database, and changes nothing else', async () => {
     const d = await queue()
-    closing.error = new Error('connection lost while talking to ghp_secret_token\nparams: ' + d.id)
+    closing.error = new Error('connection lost\nparams: ' + d.id)
     const error = silenceConsoleError()
     try {
       await expect(runDeployment(d.id, deps)).resolves.toBeUndefined()
       expect(await get(d.id)).toMatchObject({ status: 'SUCCESS', logsClosedAt: null })
       const reported = error.mock.calls.map((call) => String(call[0])).join('\n')
       expect(reported).toContain('could not close its log')
-      expect(reported).not.toContain('ghp_secret_token')
       expect(reported).not.toContain('params:')
     } finally {
       error.mockRestore()
@@ -1240,55 +1238,5 @@ describe('work directory and secrets', () => {
     await runDeployment(bad.id, deps)
     expect((await get(bad.id)).status).toBe('FAILED')
     expect(fs.existsSync(path.join(deps.config.workDir, bad.id))).toBe(false)
-  })
-
-  test('github token never reaches the deployment log', async () => {
-    deps.config = { ...deps.config, githubToken: 'ghs_secret' }
-    const { fetchSource: realFetch, railpackPrepare: realPrepare, buildImage: realBuild } = deps
-    const fetchSource = vi.fn<typeof realFetch>(async (i) => {
-      i.onLine(`Cloning from ${i.cloneUrl}`, 'stderr')
-      return realFetch(i)
-    })
-    deps.fetchSource = fetchSource
-    deps.railpackPrepare = async (i) => {
-      i.onLine('prepare saw ghs_secret', 'stdout')
-      return realPrepare(i)
-    }
-    deps.buildImage = async (i) => {
-      i.onLine('#1 token=ghs_secret', 'stdout')
-      return realBuild(i)
-    }
-    const d = await queue()
-
-    await runDeployment(d.id, deps)
-
-    expect((await get(d.id)).status).toBe('SUCCESS')
-    const log = (await logLines(d.id)).join('\n')
-    expect(log).not.toContain('ghs_secret')
-    expect(log).toContain('Cloning from https://x-access-token:***@github.com/acme/web.git')
-    expect(log).toContain('prepare saw ***')
-    expect(log).toContain('#1 token=***')
-    expect(fetchSource.mock.calls[0]![0]).toMatchObject({
-      cloneUrl: 'https://x-access-token:ghs_secret@github.com/acme/web.git',
-      redact: ['ghs_secret'],
-    })
-  })
-
-  test.each([
-    ['source error', 'fetchSource', (msg: string) => new SourceError(msg), 'could not reach '],
-    ['unexpected error', 'buildImage', (msg: string) => new Error(msg), 'internal error: could not reach '],
-  ] as const)('github token never reaches the failure reason (%s)', async (_label, dep, makeError, prefix) => {
-    deps.config = { ...deps.config, githubToken: 'ghs_secret' }
-    deps[dep] = async () => {
-      throw makeError('could not reach https://x-access-token:ghs_secret@github.com/acme/web.git')
-    }
-    const d = await queue()
-
-    await runDeployment(d.id, deps)
-
-    const row = await get(d.id)
-    expect(row.status).toBe('FAILED')
-    expect(row.failureReason).toBe(`${prefix}https://x-access-token:***@github.com/acme/web.git`)
-    expect((await logLines(d.id)).join('\n')).not.toContain('ghs_secret')
   })
 })
