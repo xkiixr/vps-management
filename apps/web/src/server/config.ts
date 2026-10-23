@@ -8,6 +8,8 @@ export type WebConfig = {
   httpsPort: number
   /** What a browser sends as `Origin` from the panel's own pages; every server action compares against it. */
   panelOrigin: string
+  /** Shared with the GitHub App; without it the webhook endpoint answers 503. */
+  githubWebhookSecret?: string
 }
 
 const hostname = (example: string) =>
@@ -42,6 +44,7 @@ const schema = z.object({
     .string()
     .refine(isOrigin, 'must be a bare origin such as http://localhost:3100 (no path or trailing slash)')
     .optional(),
+  GITHUB_WEBHOOK_SECRET: z.string().min(16, 'must be at least 16 characters').optional(),
 })
 
 /** Reads the dashboard's settings from the environment. Throws one message naming every bad variable (never their values). */
@@ -60,5 +63,6 @@ export function webConfig(env: Record<string, string | undefined> = process.env)
     panelDomain: e.PANEL_DOMAIN,
     httpsPort: e.PUBLIC_HTTPS_PORT,
     panelOrigin: e.PANEL_ORIGIN ?? publicUrl(e.PANEL_DOMAIN, e.PUBLIC_HTTPS_PORT),
+    githubWebhookSecret: e.GITHUB_WEBHOOK_SECRET,
   }
 }

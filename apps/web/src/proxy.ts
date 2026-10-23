@@ -24,6 +24,8 @@ export async function proxy(request: NextRequest) {
   return response
 }
 
+// The GitHub webhook is left out: it has no session, and a request that passes through the proxy is buffered by Next
+// before the route runs, while the route wants to refuse a body that is too large before reading it.
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/github/webhook(?:/|$)).*)'],
 }

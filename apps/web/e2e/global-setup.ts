@@ -4,7 +4,7 @@ import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createUser, generatePassword } from '@vpsm/db'
 import { setupTestDb } from '@vpsm/db/testing'
-import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_PORT, TEAMMATE_EMAIL } from './env'
+import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_PORT, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
 
 const webDir = path.resolve(import.meta.dirname, '..')
 const SERVER_START_TIMEOUT_MS = 60_000
@@ -99,6 +99,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
         APPS_DOMAIN: 'apps.example.com',
         PANEL_DOMAIN: 'panel.apps.example.com',
         PANEL_ORIGIN: E2E_ORIGIN,
+        GITHUB_WEBHOOK_SECRET: E2E_WEBHOOK_SECRET,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })

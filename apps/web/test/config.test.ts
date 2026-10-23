@@ -43,6 +43,19 @@ describe('webConfig', () => {
     }
   })
 
+  test('GITHUB_WEBHOOK_SECRET is optional, and empty counts as not set', () => {
+    expect(webConfig(base).githubWebhookSecret).toBeUndefined()
+    expect(webConfig({ ...base, GITHUB_WEBHOOK_SECRET: '' }).githubWebhookSecret).toBeUndefined()
+    expect(webConfig({ ...base, GITHUB_WEBHOOK_SECRET: 'x'.repeat(16) }).githubWebhookSecret).toBe('x'.repeat(16))
+  })
+
+  test('GITHUB_WEBHOOK_SECRET must be at least 16 characters, and the message does not repeat it', () => {
+    const short = 'abcdefghijklmno'
+    const message = configError({ ...base, GITHUB_WEBHOOK_SECRET: short })
+    expect(message).toContain('GITHUB_WEBHOOK_SECRET must be at least 16 characters')
+    expect(message).not.toContain(short)
+  })
+
   test('names every missing or invalid variable', () => {
     const message = configError({})
     for (const name of ['DATABASE_URL', 'APPS_DOMAIN', 'PANEL_DOMAIN']) expect(message).toContain(name)

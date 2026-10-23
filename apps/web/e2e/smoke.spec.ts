@@ -1,5 +1,6 @@
+import { createHmac } from 'node:crypto'
 import { expect, type Page, type Response, test } from '@playwright/test'
-import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, TEAMMATE_EMAIL } from './env'
+import { ADMIN_EMAIL, ADMIN_PASSWORD_VAR, E2E_ORIGIN, E2E_WEBHOOK_SECRET, TEAMMATE_EMAIL } from './env'
 
 test.skip(process.env.E2E !== '1', 'set E2E=1 to run the browser smoke test (see playwright.config.ts)')
 // The tests share one server and one scratch database but not their data: each signs in on its own and works in a
@@ -45,6 +46,49 @@ test('sign in, create a project and a service, see it queued, sign out', async (
     const rows = page.getByRole('table').getByRole('row').filter({ has: page.locator('[data-status="QUEUED"]') })
     await expect(rows).toHaveCount(1)
     await expect(rows.first()).toContainText('Queued')
+  })
+
+  // The webhook is not for browsers: no session, no Origin, and the signature over the exact bytes is the only proof.
+  await test.step('a signed push from GitHub queues a deployment of that commit; a forged one does not', async () => {
+    const body = Buffer.from(
+      JSON.stringify({
+        ref: 'refs/heads/main',
+        after: 'c'.repeat(40),
+        repository: { full_name: 'acme/web' },
+        head_commit: { message: 'ship the smoke test\n\nand its details' },
+        sender: { login: 'dev1' },
+      }),
+    )
+    const deliver = (signature: string) =>
+      page.request.post('/api/github/webhook', {
+        data: body,
+        headers: {
+          'content-type': 'application/json',
+          'x-github-event': 'push',
+          'x-github-delivery': 'smoke-delivery',
+          'x-hub-signature-256': signature,
+        },
+      })
+
+    const forged = await deliver('sha256=' + createHmac('sha256', 'another-secret-0123456789').update(body).digest('hex'))
+    expect(forged.status()).toBe(401)
+    expect(await forged.json()).toEqual({ error: 'invalid signature' })
+
+    const response = await deliver('sha256=' + createHmac('sha256', E2E_WEBHOOK_SECRET).update(body).digest('hex'))
+    expect(response.status()).toBe(202)
+    expect(response.headers()['cache-control']).toBe('no-store')
+    expect(await response.json()).toEqual({ queued: 1 })
+
+    await page.reload()
+    const rows = page.getByRole('table').getByRole('row')
+    const pushed = rows.filter({ hasText: 'Push' })
+    await expect(pushed).toHaveCount(1)
+    await expect(pushed.first()).toContainText('ccccccc')
+    await expect(pushed.first()).toContainText('ship the smoke test')
+    await expect(pushed.first().locator('[data-status="QUEUED"]')).toHaveCount(1)
+    // It replaced the first deployment, which was still waiting.
+    await expect(rows.filter({ has: page.locator('[data-status="QUEUED"]') })).toHaveCount(1)
+    await expect(rows.filter({ has: page.locator('[data-status="SKIPPED"]') })).toHaveCount(1)
   })
 
   await test.step('sign out, after which the dashboard asks for the sign-in again', async () => {
